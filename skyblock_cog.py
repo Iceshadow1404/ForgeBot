@@ -3,12 +3,37 @@
 import discord
 from discord import app_commands
 from discord.ext import commands
-import os # Import os to access environment variables
-import asyncio # Keep asyncio for potential delays
-import time
+import os
+import time # Keep time for current time
+import json # Import json to load the forge items data
+import asyncio
 
 # Import functions from skyblock.py
 from skyblock import get_uuid, format_uuid, get_player_profiles, find_profile_by_name
+
+# Helper function to format time difference
+def format_time_difference(milliseconds):
+    """Formats a time difference in milliseconds into a human-readable string."""
+    if milliseconds <= 0:
+        return "Fertig"
+
+    seconds = milliseconds // 1000
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    days, hours = divmod(hours, 24)
+
+    parts = []
+    if days > 0:
+        parts.append(f"{days}t")
+    if hours > 0:
+        parts.append(f"{hours}h")
+    if minutes > 0:
+        parts.append(f"{minutes}m")
+    if seconds > 0 or not parts: # Show seconds if less than a minute, or if it's 0 seconds
+         parts.append(f"{seconds}s")
+
+    return " ".join(parts)
+
 
 class SkyblockCog(commands.Cog, name="Skyblock Funktionen"):
     """
@@ -16,15 +41,29 @@ class SkyblockCog(commands.Cog, name="Skyblock Funktionen"):
     """
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # Load the Hypixel API Key from environment variables
         self.hypixel_api_key = os.getenv("HYPIXEL_API_KEY")
         if not self.hypixel_api_key:
             print("WARNING: HYPIXEL_API_KEY not found in environment variables.")
             print("Skyblock API commands will not work.")
 
+        # Load forge item durations from JSON
+        self.forge_items_data = {}
+        try:
+            with open('forge_items.json', 'r') as f:
+                self.forge_items_data = json.load(f)
+            print("forge_items.json successfully loaded.")
+        except FileNotFoundError:
+            print("WARNING: forge_items.json not found. Forge duration calculation will not work.")
+        except json.JSONDecodeError:
+            print("ERROR: Could not decode forge_items.json. Check the file for syntax errors.")
+        except Exception as e:
+            print(f"An unexpected error occurred loading forge_items.json: {e}")
+
+
     @commands.Cog.listener()
     async def on_ready(self):
         print(f"{self.__class__.__name__} Cog wurde geladen und ist bereit.")
+
 
     @app_commands.command(name="forge", description="Zeigt die aktuellen Items in der Skyblock Forge eines Spielers an.")
     @app_commands.describe(username="Der Minecraft-Name des Spielers.")
@@ -32,15 +71,15 @@ class SkyblockCog(commands.Cog, name="Skyblock Funktionen"):
     async def forge_command(self, interaction: discord.Interaction, username: str, profile_name: str = None):
         """
         Fetches and displays the items currently in the player's Skyblock forge.
+        Includes remaining time calculation if forge_items.json is available.
         """
         if not self.hypixel_api_key:
             await interaction.response.send_message(
                 "Der API-Schlüssel für Hypixel ist nicht konfiguriert. Bitte informiere den Bot-Betreiber.",
-                ephemeral=True # Only visible to the user who used the command
+                ephemeral=True
             )
             return
 
-        # Defer the response as API calls can take time
         await interaction.response.defer()
 
         # 1. Get the player's UUID
@@ -71,18 +110,12 @@ class SkyblockCog(commands.Cog, name="Skyblock Funktionen"):
                 await interaction.followup.send(f"Profil '{profile_name}' für '{username}' nicht gefunden.")
                 return
         else:
-            # If no profile name is given, use the last played profile
-            # The Hypixel API usually returns profiles with 'selected': true for the last played
-            # Or you can sort by the 'last_save' timestamp if 'selected' isn't reliable
             for profile in profiles:
-                 # Check for 'selected' key if available, otherwise use a heuristic like last_save
-                 if profile.get("selected", False): # Prioritize 'selected'
+                 if profile.get("selected", False):
                      target_profile = profile
                      break
             if not target_profile and profiles:
-                 # Fallback: Use the profile with the latest last_save if 'selected' isn't found
                  target_profile = max(profiles, key=lambda p: p.get("members", {}).get(uuid, {}).get("last_save", 0))
-
 
             if not target_profile:
                  await interaction.followup.send(f"Konnte das zuletzt gespielte Profil für '{username}' nicht bestimmen.")
@@ -93,7 +126,6 @@ class SkyblockCog(commands.Cog, name="Skyblock Funktionen"):
 
         # 4. Extract Forge Data
         try:
-            # Navigate through the nested structure
             member_data = target_profile.get("members", {}).get(uuid, {})
             forge_data = member_data.get("forge", {}).get("forge_processes", {}).get("forge_1", {})
 
@@ -101,44 +133,52 @@ class SkyblockCog(commands.Cog, name="Skyblock Funktionen"):
                 await interaction.followup.send(f"Keine aktiven Gegenstände in der Forge auf Profil '{profile_cute_name}' von '{username}'.")
                 return
 
-            # 5. Format and display forge items
-            forge_items = []
+            # 5. Format and display forge items with remaining time
+            forge_items_output = []
+            current_time_ms = time.time() * 1000 # Get current time in milliseconds
+
             for slot, item_data in forge_data.items():
                 item_id = item_data.get("id", "Unbekannter Gegenstand")
                 item_type = item_data.get("type", "Unbekannter Typ")
                 start_time_ms = item_data.get("startTime")
 
-                # Calculate remaining time if startTime is available
-                remaining_time_str = "Zeit unbekannt"
-                if start_time_ms:
-                    # Hypixel API time is in milliseconds
-                    start_time_sec = start_time_ms / 1000
-                    current_time_sec = time.time()
-                    # To calculate remaining time, you would need the total forging time for the item_id.
-                    # This data is not typically in the profile API.
-                    # For simplicity, we'll just show the item and start time for now.
-                    # You could potentially add a lookup for item forging times if you have that data elsewhere.
-                    # For this response, we'll just list the item ID and slot.
-                    forge_items.append(f"Slot {slot}: {item_id} ({item_type})")
+                item_name = item_id # Default to ID if name not found
+                remaining_time_str = "Zeit unbekannt" # Default if duration data is missing
 
-            if not forge_items:
+                # Look up item duration and name from forge_items_data
+                forge_item_info = self.forge_items_data.get(item_id)
+
+                if forge_item_info and start_time_ms is not None:
+                    item_name = forge_item_info.get("name", item_id)
+                    duration_ms = forge_item_info.get("duration")
+
+                    if duration_ms is not None:
+                        end_time_ms = start_time_ms + duration_ms
+                        remaining_time_ms = end_time_ms - current_time_ms
+                        remaining_time_str = format_time_difference(remaining_time_ms)
+                    else:
+                         remaining_time_str = "Dauer unbekannt" # Duration not found in JSON
+
+                elif start_time_ms is None:
+                     remaining_time_str = "Startzeit unbekannt" # Start time missing from API
+
+                forge_items_output.append(f"Slot {slot}: {item_name} ({item_type}) - Noch {remaining_time_str}")
+
+
+            if not forge_items_output:
                  await interaction.followup.send(f"Keine aktiven Gegenstände in der Forge auf Profil '{profile_cute_name}' von '{username}'.")
                  return
 
 
             response_message = f"Aktuelle Items in der Forge auf Profil '{profile_cute_name}' von '{username}':\n"
-            response_message += "\n".join(forge_items)
+            response_message += "\n".join(forge_items_output)
 
             await interaction.followup.send(response_message)
 
         except Exception as e:
             print(f"Error processing forge data for {username}: {e}")
-            await interaction.followup.send(f"Ein interner Fehler ist beim Abrufen der Forge-Daten aufgetreten.")
+            await interaction.followup.send(f"Ein interner Fehler ist beim Abrufen oder Verarbeiten der Forge-Daten aufgetreten.")
 
 
 async def setup(bot: commands.Bot):
-    # Fügt eine Instanz des Cogs zum Bot hinzu
     await bot.add_cog(SkyblockCog(bot))
-
-# Benötigt für die simulierte API-Verzögerung in den Beispielen oben
-# import asyncio # Already imported
