@@ -81,6 +81,59 @@ def calculate_quick_forge_reduction(forge_time_level):
         print(f"Warning: Unexpected forge_time_level: {level}")
         return 0.0
 
+# Define the pagination view for the forge list
+class ForgePaginationView(discord.ui.View):
+    def __init__(self, embeds: list[discord.Embed], interaction: discord.Interaction, timeout=180):
+        super().__init__(timeout=timeout)
+        self.embeds = embeds
+        self.current_page = 0
+        self.interaction = interaction # Store the original interaction to update the message
+
+        # Disable buttons if there's only one page
+        if len(self.embeds) <= 1:
+            for button in self.children:
+                button.disabled = True
+        else:
+             self.update_buttons()
+
+
+    def update_buttons(self):
+        # Disable 'Prev' button on the first page, 'Next' on the last
+        self.prev_button.disabled = self.current_page == 0
+        self.next_button.disabled = self.current_page == len(self.embeds) - 1
+
+    @discord.ui.button(label="Prev", style=discord.ButtonStyle.blurple)
+    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.update_buttons()
+            await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
+        else:
+             await interaction.response.defer() # Ignore button press if already on first page
+
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.blurple)
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.current_page < len(self.embeds) - 1:
+            self.current_page += 1
+            self.update_buttons()
+            await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
+        else:
+             await interaction.response.defer() # Ignore button press if already on last page
+
+    async def on_timeout(self):
+        # Disable all buttons on timeout
+        for button in self.children:
+            button.disabled = True
+        try:
+            # Attempt to update the message with disabled buttons
+            await self.interaction.edit_original_response(view=self)
+        except discord.NotFound:
+             # Interaction message might have been deleted
+             pass
+        except Exception as e:
+             print(f"Error updating view on timeout: {e}")
+
 
 class ForgeCog(commands.Cog, name="Forge Functions"):
     """
@@ -136,7 +189,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
     async def forge_command(self, interaction: discord.Interaction, username: str = None, profile_name: str = None):
         """
         Fetches and displays the items currently in the player's Skyblock forge.
-        - If no username or profile_name is provided, lists all active forges across registered accounts.
+        - If no username or profile_name is provided, lists all active forges across registered accounts in an interactive Embed view.
         - If username is provided, targets that player. Defaults to their latest profile if no profile_name.
         - If profile_name is provided (with or without username), targets that specific profile.
         """
@@ -149,7 +202,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
 
         await interaction.response.defer()
 
-        # --- NEW LOGIC: Handle case with no arguments (list all active forges) ---
+        # --- NEW LOGIC: Handle case with no arguments (list all active forges in Embeds) ---
         if username is None and profile_name is None:
             discord_user_id = str(interaction.user.id)
             self.registrations = self.load_registrations() # Reload registrations
@@ -160,9 +213,10 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                  await interaction.followup.send("You have no registered Minecraft accounts. Use `/register` to add one.")
                  return
 
-            active_forges_list = [] # List to store formatted info for active forges
+            active_forge_profiles_data = [] # List to store data for profiles with active forges
 
-            await interaction.followup.send("Checking registered accounts for active forges...", ephemeral=False) # Immediate feedback
+            # Indicate that the bot is checking
+            await interaction.followup.send("Checking registered accounts for active forges...", ephemeral=False)
 
             # Iterate through all registered accounts
             for account in user_accounts:
@@ -181,8 +235,6 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                     continue # Skip if no profiles found for this account
 
                 # Attempt to get the player's current display name for this UUID
-                # We can try to get it from the profile data for any profile,
-                # or fall back to the UUID.
                 current_username_display = f"UUID: `{current_uuid}`"
                 if profiles:
                     # Take member data from the first profile found to get displayname
@@ -199,9 +251,20 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                      member_data = profile.get("members", {}).get(current_uuid, {})
                      forge_processes_data = member_data.get("forge", {}).get("forge_processes", {})
 
+                     # Check if there are actually items with start times in this profile's forge data
+                     has_active_items = False
                      if forge_processes_data:
-                         # Found active forge items in this profile, format them
-                         profile_forge_items = []
+                          for forge_type_key in forge_processes_data.keys():
+                             slots_data = forge_processes_data[forge_type_key]
+                             for slot_data in slots_data.values():
+                                 if slot_data.get("startTime") is not None:
+                                     has_active_items = True
+                                     break
+                             if has_active_items: break # Found at least one active item in this profile
+
+                     if has_active_items:
+                         # Found active forge items in this profile, collect data for Embed
+                         profile_forge_items_formatted = []
                          current_time_ms = time.time() * 1000
 
                          # Get Quick Forge Perk Level for this profile
@@ -211,66 +274,77 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                          if time_reduction_percent > 0:
                               perk_applied_message = f" (Quick Forge: -{time_reduction_percent:.1f}%)"
 
+                         sorted_forge_types = sorted(forge_processes_data.keys())
 
-                         # Check if there are actually items with start times
-                         has_active_items = False
-                         for forge_type_key in forge_processes_data.keys():
-                            slots_data = forge_processes_data[forge_type_key]
-                            for slot_data in slots_data.values():
-                                if slot_data.get("startTime") is not None:
-                                    has_active_items = True
-                                    break
-                            if has_active_items: break # Found at least one active item in this profile
+                         for forge_type_key in sorted_forge_types:
+                             slots_data = forge_processes_data[forge_type_key]
+                             # Sort slots numerically
+                             sorted_slots = sorted(slots_data.keys(), key=lambda x: int(x) if x.isdigit() else float('inf'))
 
-                         if has_active_items:
-                            profile_forge_items.append(f"**Profile:** '{profile_cute_name}' of '{current_username_display}'{perk_applied_message}")
+                             for slot in sorted_slots:
+                                 item_data = slots_data.get(slot)
+                                 if not item_data: continue
 
-                            sorted_forge_types = sorted(forge_processes_data.keys())
+                                 item_id = item_data.get("id", "Unknown Item")
+                                 start_time_ms = item_data.get("startTime")
 
-                            for forge_type_key in sorted_forge_types:
-                                slots_data = forge_processes_data[forge_type_key]
-                                # Sort slots numerically
-                                sorted_slots = sorted(slots_data.keys(), key=lambda x: int(x) if x.isdigit() else float('inf'))
+                                 if start_time_ms is not None: # Only list items that are actually active
+                                     item_name = item_id
+                                     remaining_time_str = "Time unknown"
 
-                                for slot in sorted_slots:
-                                    item_data = slots_data.get(slot)
-                                    if not item_data: continue
+                                     forge_item_info = self.forge_items_data.get(item_id)
 
-                                    item_id = item_data.get("id", "Unknown Item")
-                                    start_time_ms = item_data.get("startTime")
+                                     if forge_item_info:
+                                         item_name = forge_item_info.get("name", item_id)
+                                         base_duration_ms = forge_item_info.get("duration")
 
-                                    if start_time_ms is not None: # Only list items that are actually active
-                                        item_name = item_id
-                                        remaining_time_str = "Time unknown"
+                                         if base_duration_ms is not None:
+                                             effective_duration_ms = base_duration_ms * (1 - time_reduction_percent / 100)
+                                             end_time_ms = start_time_ms + effective_duration_ms
+                                             remaining_time_ms = end_time_ms - current_time_ms
+                                             remaining_time_str = format_time_difference(remaining_time_ms)
+                                         else:
+                                              remaining_time_str = "Duration unknown (JSON)"
+                                     else:
+                                          remaining_time_str = "Duration unknown (Item data missing)"
 
-                                        forge_item_info = self.forge_items_data.get(item_id)
+                                     profile_forge_items_formatted.append(f"Slot {slot} ({forge_type_key.replace('_', ' ').title()}): {item_name} - Remaining: {remaining_time_str}")
 
-                                        if forge_item_info:
-                                            item_name = forge_item_info.get("name", item_id)
-                                            base_duration_ms = forge_item_info.get("duration")
-
-                                            if base_duration_ms is not None:
-                                                effective_duration_ms = base_duration_ms * (1 - time_reduction_percent / 100)
-                                                end_time_ms = start_time_ms + effective_duration_ms
-                                                remaining_time_ms = end_time_ms - current_time_ms
-                                                remaining_time_str = format_time_difference(remaining_time_ms)
-                                            else:
-                                                 remaining_time_str = "Duration unknown (JSON)"
-                                        else:
-                                             remaining_time_str = "Duration unknown (Item data missing)"
-
-                                        profile_forge_items.append(f"  Slot {slot} ({forge_type_key.replace('_', ' ').title()}): {item_name} - Remaining: {remaining_time_str}")
+                         # Store the data needed for the Embed for this profile
+                         active_forge_profiles_data.append({
+                             "uuid": current_uuid,
+                             "username": current_username_display,
+                             "profile_name": profile_cute_name,
+                             "perk_message": perk_applied_message,
+                             "items": profile_forge_items_formatted
+                         })
 
 
-                            if profile_forge_items: # Add this profile's forge info if any active items were found
-                                active_forges_list.extend(profile_forge_items)
-                                active_forges_list.append("") # Add a blank line between profiles
+            # After checking all accounts and profiles, create and send the paginated Embeds
+            if active_forge_profiles_data:
+                 embed_list = []
+                 for profile_data in active_forge_profiles_data:
+                     embed = discord.Embed(
+                         title=f"Forge Items for '{profile_data['profile_name']}' on '{profile_data['username']}'",
+                         description="\n".join(profile_data['items']) or "No active items in Forge slots.", # Use items or a fallback
+                         color=discord.Color.blue() # You can choose a different color
+                     )
+                     if profile_data['perk_message']:
+                          embed.add_field(name="Perk", value=profile_data['perk_message'].strip(), inline=False)
 
+                     # Optional: Add a footer with page number
+                     # embed.set_footer(text=f"Profile {len(embed_list) + 1}/{len(active_forge_profiles_data)}")
 
-            # After checking all accounts and profiles, send the summary message
-            if active_forges_list:
-                 final_response = "Active items found in the Forge across your registered accounts:\n" + "\n".join(active_forges_list).strip()
-                 await interaction.followup.send(final_response)
+                     embed_list.append(embed)
+
+                 if embed_list:
+                      view = ForgePaginationView(embeds=embed_list, interaction=interaction)
+                      # Edit the initial "Checking..." message with the first embed and the view
+                      await interaction.edit_original_response(content="", embed=embed_list[0], view=view)
+                 else:
+                      # This case should ideally not be reached if active_forge_profiles_data is not empty
+                      await interaction.followup.send("No active items found in the Forge across your registered accounts.")
+
             else:
                  await interaction.followup.send("No active items found in the Forge across your registered accounts.")
 
@@ -280,12 +354,12 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
 
         # --- EXISTING LOGIC: Handle cases where username or profile_name IS provided ---
         # This part remains largely the same as the previous version,
-        # targeting a specific user/profile.
+        # targeting a specific user/profile and sending a single message (can be an Embed too if desired).
 
         target_uuid = None
-        target_username_display = None # Variable to store the name for the final message
+        target_username_display = None
 
-        # 1. Determine the target UUID (already done in the new logic block, but repeat for clarity if execution reaches here)
+        # 1. Determine the target UUID
         if username:
             target_username_display = username
             target_uuid = get_uuid(username)
@@ -293,9 +367,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                 await interaction.followup.send(f"Could not find Minecraft player '{username}'. Please check the username.")
                 return
         else:
-             # This else block should theoretically not be reached if username is None AND profile_name is None
-             # But keeping it here provides a fallback if the initial check is modified later.
-             # If reached, it means profile_name is NOT None but username IS None.
+             # This else block is reached if profile_name is NOT None but username IS None.
              discord_user_id = str(interaction.user.id)
              self.registrations = self.load_registrations()
 
@@ -308,7 +380,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
              # Use the first registered account's UUID if only profile_name was provided
              first_registered_account = user_accounts[0]
              target_uuid = first_registered_account['uuid']
-             target_username_display = f"Registered UUID: `{target_uuid}`" # Fallback display name
+             target_username_display = f"Registered UUID: `{target_uuid}`"
 
 
         uuid_dashed = format_uuid(target_uuid)
@@ -362,7 +434,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
         member_data_check_display_targeted = target_profile.get("members", {}).get(target_uuid, {})
         player_name_in_profile_targeted = member_data_check_display_targeted.get("displayname")
         if player_name_in_profile_targeted:
-             target_username_display = player_name_in_profile_targeted # Use the display name from the targeted profile
+             target_username_display = player_name_in_profile_targeted
 
 
         # 4. Get Quick Forge Perk Level and calculate reduction
@@ -419,18 +491,21 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                          remaining_time_str = "Duration unknown (Item data missing)"
 
 
-                    # Only add items that are actually active (have a start time)
-                    if start_time_ms is not None:
+                    if start_time_ms is not None: # Only add items that are actually active
                          forge_items_output.append(f"Slot {slot} ({forge_type_key.replace('_', ' ').title()}): {item_name} - Remaining: {remaining_time_str}")
 
             if not forge_items_output:
                  await interaction.followup.send(f"No active items found in the Forge on profile '{profile_cute_name}' of '{target_username_display}'{perk_applied_message}.")
                  return
 
-            response_message = f"Current items in the Forge on profile '{profile_cute_name}' of '{target_username_display}'{perk_applied_message}:\n"
-            response_message += "\n".join(forge_items_output)
+            # Send a single Embed for the specific user/profile case
+            embed = discord.Embed(
+                title=f"Current items in the Forge",
+                description=f"Profile: '{profile_cute_name}' of '{target_username_display}'{perk_applied_message}\n\n" + "\n".join(forge_items_output),
+                color=discord.Color.green() # Different color for single profile view
+            )
 
-            await interaction.followup.send(response_message)
+            await interaction.followup.send(embed=embed)
 
         except Exception as e:
             print(f"Error processing forge data for {target_username_display} on profile {profile_cute_name}: {e}")
