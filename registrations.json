@@ -10,6 +10,12 @@
         {
             "uuid": "4154a5602654493094d3497d2ad6849f",
             "profiles": []
+        },
+        {
+            "uuid": "8a9f184148e948edb14f76a124e6c9df",
+            "profiles": [
+                "Kiwi"
+            ]
         }
     ]
 }
