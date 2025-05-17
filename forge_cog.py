@@ -13,8 +13,7 @@ from embed import create_forge_embed, ForgePaginationView, SingleForgeView
 from skyblock import get_uuid, format_uuid, get_player_profiles, find_profile_by_name, uuid_to_username
 from constants import *
 from logs import logger
-from utils import format_time_difference
-# Import the new notification manager class
+
 from forge_notifications import ForgeNotificationManager
 
 # --- Helper Functions (Kept in forge_cog.py as they are used by the command) ---
@@ -45,13 +44,13 @@ def calculate_quick_forge_reduction(forge_time_level: int | None) -> float:
 def format_active_forge_items(forge_processes_data: dict, forge_items_config: dict, time_reduction_percent: float,
                               clock_is_actively_buffing: bool) -> list[str]:
     """
-    Formats the active forge items with remaining times, applying buffs.
+    Formats the active forge items with their end times, applying buffs.
     Returns a list of formatted strings, one for each active item.
     This version is for displaying in the /forge command.
     """
     logger.debug(f"Entering format_active_forge_items for command. Reduction: {time_reduction_percent}%, Clock Active: {clock_is_actively_buffing}")
     forge_items_output = []
-    current_time_ms = time.time() * 1000
+    current_time_ms = time.time() * 1000 # Still useful for ensuring end time is not in the past
 
     if not isinstance(forge_processes_data, dict) or not forge_processes_data:
         logger.debug("No forge process data found or invalid. Returning empty list.")
@@ -80,7 +79,8 @@ def format_active_forge_items(forge_processes_data: dict, forge_items_config: di
             start_time_ms = item_data.get("startTime")
 
             item_name = item_id
-            remaining_time_str = "Time unknown"
+            # Change default display string to reflect end time
+            end_time_display = "End time unknown"
 
             forge_item_info = forge_items_config.get(item_id)
             logger.debug(f"Item ID: {item_id}, Start Time: {start_time_ms}")
@@ -92,38 +92,47 @@ def format_active_forge_items(forge_processes_data: dict, forge_items_config: di
 
                 if base_duration_ms is not None and isinstance(base_duration_ms, (int, float)):
                     effective_duration_ms = base_duration_ms * (1 - time_reduction_percent / 100)
+
+                    # Calculate the end time including the Quick Forge reduction
                     end_time_ms = start_time_ms + effective_duration_ms
-                    remaining_time_ms = end_time_ms - current_time_ms
 
-                    logger.debug(f"Base Duration: {base_duration_ms}, Effective Duration: {effective_duration_ms}, End Time: {end_time_ms}, Remaining Before Clock: {remaining_time_ms}")
-
+                    # If the clock is actively buffing (meaning it was used today),
+                    # the end time displayed should reflect that reduction.
                     if clock_is_actively_buffing:
-                        logger.debug(f"Clock is active. Applying {ENCHANTED_CLOCK_REDUCTION_MS}ms reduction.")
-                        remaining_time_ms = max(0, remaining_time_ms - ENCHANTED_CLOCK_REDUCTION_MS)
-                        logger.debug(f"Remaining After Clock: {remaining_time_ms}")
+                         logger.debug(f"Clock is active. Applying {ENCHANTED_CLOCK_REDUCTION_MS}ms reduction to end time.")
+                         # Apply reduction to the end time
+                         end_time_ms = end_time_ms - ENCHANTED_CLOCK_REDUCTION_MS
+                         logger.debug(f"End time after clock: {end_time_ms}")
 
+                    # Ensure the displayed end time is not in the past relative to current time
+                    # This handles cases where the item finished between API calls.
+                    final_display_end_time_ms = max(current_time_ms, end_time_ms)
 
-                    remaining_time_str = format_time_difference(remaining_time_ms)
-                    logger.debug(f"Formatted remaining time: {remaining_time_str}")
+                    # Convert end time to seconds for Discord timestamp
+                    end_timestamp_seconds = int(final_display_end_time_ms / 1000)
+
+                    # Format as Discord Unix Timestamp for local time display
+                    # Using ':t' for short time. Other options: :T (long time), :R (relative), :f (short date/time), :F (long date/time)
+                    end_time_display = f"<t:{end_timestamp_seconds}:t>"
+                    logger.debug(f"Formatted end time: {end_time_display}")
+
                 else:
-                    remaining_time_str = "Duration unknown (JSON)"
+                    end_time_display = "Duration unknown (JSON)"
                     logger.warning(f"Forge item duration missing or invalid in JSON for item ID: {item_id}")
 
-
             elif start_time_ms is None:
-                remaining_time_str = "Start time unknown (API)"
+                end_time_display = "Start time unknown (API)"
                 logger.warning(f"Start time missing for item ID: {item_id} from API.")
             else:
-                remaining_time_str = "Duration unknown (Item data missing)"
+                end_time_display = "Duration unknown (Item data missing)"
                 logger.warning(f"Forge item info missing for item ID: {item_id}")
 
-
+            # Append the formatted string with the End time timestamp
             forge_items_output.append(
-                f"Slot {slot} ({forge_type_key.replace('_', ' ').title()}): {item_name} - Remaining: {remaining_time_str}")
-            logger.debug(f"Added formatted item: {forge_items_output[-1]}")
+                f"Slot {slot} ({forge_type_key.replace('_', ' ').title()}): {item_name} - Ends: {end_time_display}")
+            logger.debug(f"Added formatted item with end time: {forge_items_output[-1]}")
 
-
-    logger.debug(f"Exiting format_active_forge_items for command. Returning {len(forge_items_output)} items.")
+    logger.debug(f"Exiting format_active_forge_items. Returning {len(forge_items_output)} items.")
     return forge_items_output
 
 
@@ -303,6 +312,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
         """Checks if the Enchanted Clock buff is active for a profile."""
         logger.debug(f"Checking if clock is used for UUID: {uuid}, Profile ID: {profile_internal_id}")
         profile_data = self.clock_usage.get(uuid, {}).get(profile_internal_id)
+        # Clock is considered "used" and actively buffing if the end timestamp is in the future
         if isinstance(profile_data, dict) and profile_data.get("end_timestamp") is not None and isinstance(profile_data.get("end_timestamp"), (int, float)):
              is_active = time.time() * 1000 < profile_data["end_timestamp"]
              logger.debug(f"Clock is active: {is_active} for UUID: {uuid}, Profile ID: {profile_internal_id}")
@@ -314,15 +324,18 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
         """Marks the Enchanted Clock as used for a profile."""
         logger.info(f"Marking clock as used for UUID: {uuid}, Profile ID: {profile_internal_id}, Profile Name: {profile_cute_name}")
         current_time_ms = time.time() * 1000
-        end_timestamp = current_time_ms + ENCHANTED_CLOCK_REDUCTION_MS
+        # The end timestamp for the *buff itself* is current time + reduction duration
+        # This is different from the item's end time.
+        buff_end_timestamp = current_time_ms + ENCHANTED_CLOCK_REDUCTION_MS
         if uuid not in self.clock_usage:
             self.clock_usage[uuid] = {}
             logger.debug(f"Created new UUID entry in clock usage for {uuid}")
+        # Store the end timestamp of the *buff*
         self.clock_usage[uuid][profile_internal_id] = {
             "profile_name": profile_cute_name,
-            "end_timestamp": end_timestamp
+            "end_timestamp": buff_end_timestamp
         }
-        logger.debug(f"Set end timestamp for clock usage: {end_timestamp} for Profile ID: {profile_internal_id}")
+        logger.debug(f"Set buff end timestamp for clock usage: {buff_end_timestamp} for Profile ID: {profile_internal_id}")
         self.save_clock_usage()
 
     def reset_clock_usage(self, uuid: str, profile_internal_id: str):
@@ -365,6 +378,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                     "profile_name" not in pdata or
                     not isinstance(pdata.get("profile_name"), str)
                 )
+                # An entry is expired if the buff end time is in the past
                 is_expired = not is_invalid and current_time_ms >= pdata.get("end_timestamp", 0)
 
                 if is_invalid or is_expired:
@@ -522,12 +536,12 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                         clock_is_actively_buffing = self.is_clock_used(current_uuid, profile_internal_id)
                         logger.debug(f"Profile {profile_internal_id}: Clock is actively buffing: {clock_is_actively_buffing}")
 
-                        # Use the helper function from this file
+                        # Use the modified helper function from this file to format with END TIME
                         formatted_items_list = format_active_forge_items(
                             forge_processes_data, self.forge_items_data,
                             time_reduction_percent, clock_is_actively_buffing
                         )
-                        logger.debug(f"Formatted {len(formatted_items_list)} active items for profile {profile_internal_id}.")
+                        logger.debug(f"Formatted {len(formatted_items_list)} active items for profile {profile_internal_id} with end times.")
 
 
                         active_forge_profiles_data.append({
@@ -538,7 +552,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                             "perk_message": perk_message,
                             "items_raw": forge_processes_data,
                             "time_reduction_percent": time_reduction_percent,
-                            # formatted_items is generated here for the initial embed
+                            # formatted_items is generated here with end times for the initial embed
                             "formatted_items": "\n".join(formatted_items_list)
                         })
                         logger.debug(f"Added profile {profile_internal_id} to active forge profiles list.")
@@ -695,12 +709,12 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                 f"No active items found in Forge on profile '{profile_cute_name}' of '{target_username_display}'{perk_message}.", ephemeral=True)
             return
 
-        # Use the helper function from this file
+        # Use the modified helper function from this file to format with END TIME
         formatted_items_list_single = format_active_forge_items(
             forge_processes_data, self.forge_items_data,
             time_reduction_percent, clock_is_actively_buffing_single
         )
-        logger.debug(f"Formatted {len(formatted_items_list_single)} active items for single profile '{profile_cute_name}'.")
+        logger.debug(f"Formatted {len(formatted_items_list_single)} active items for single profile '{profile_cute_name}' with end times.")
 
 
         single_profile_data = {
@@ -711,19 +725,30 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
             "perk_message": perk_message,
             "items_raw": forge_processes_data,
             "time_reduction_percent": time_reduction_percent,
+            # Add formatted_items here with end times for the single view as well
+            "formatted_items": "\n".join(formatted_items_list_single)
         }
         logger.debug("Prepared single profile data for embed.")
 
 
+        # Use the formatted_items string which now contains end times
         embed = create_forge_embed(
             single_profile_data,
-            "\n".join(formatted_items_list_single) if formatted_items_list_single else "No active items found."
+            single_profile_data["formatted_items"] if single_profile_data["formatted_items"] else "No active items found."
         )
 
+        # Add the clock note if the clock buff is actively applied for display purposes
+        # The end time calculation already includes the clock reduction if active.
         if clock_is_actively_buffing_single:
             clock_note = "\n*Enchanted Clock buff applied.*"
-            embed.description = (embed.description or "") + clock_note
-            logger.debug("Added clock note to single embed description.")
+            # Ensure we don't add the note if there are no active items
+            if formatted_items_list_single:
+                 embed.description = (embed.description or "") + clock_note
+                 logger.debug("Added clock note to single embed description.")
+            else:
+                 # If no active items but clock was used (shouldn't happen with current logic but as a safeguard)
+                 # maybe add a different message or just skip the note. Sticking to skipping for now.
+                 pass
 
 
         view = SingleForgeView(
@@ -731,7 +756,8 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
             interaction,
             self.forge_items_data,
             self, # Pass self (ForgeCog instance) to the view for clock usage
-            "\n".join(formatted_items_list_single)
+            # Pass the formatted_items string which now contains end times
+            single_profile_data["formatted_items"]
         )
         logger.debug("Created SingleForgeView.")
 
