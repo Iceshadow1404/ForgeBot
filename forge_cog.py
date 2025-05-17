@@ -139,7 +139,7 @@ def format_active_forge_items(forge_processes_data: dict, forge_items_config: di
                 remaining_time_str = "Duration unknown (Item data missing)"
 
             forge_items_output.append(
-                f"Slot {slot} ({forge_type_key.replace('_', ' ').title()}): {item_name} - Remaining: {remaining_time_str}")
+                f"Slot {slot}: {item_name} - Remaining: {remaining_time_str}")
 
     return forge_items_output
 
