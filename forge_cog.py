@@ -17,6 +17,10 @@ REGISTRATION_FILE = os.path.join(BasePath, "registrations.json")
 CLOCK_USAGE_FILE = os.path.join(BasePath, 'clock_usage.json')
 NOTIFICATIONS_FILE = os.path.join(BasePath, 'forge_notifications.json')
 
+print(f"DEBUG: Full registration file path: {REGISTRATION_FILE}")
+print(f"DEBUG: Full CLOCK file path: {CLOCK_USAGE_FILE}")
+print(f"DEBUG: Full NOTI file path: {NOTIFICATIONS_FILE}")
+
 # Define a constant for the Enchanted Clock reduction (1 hour in milliseconds)
 ENCHANTED_CLOCK_REDUCTION_MS = 60 * 60 * 1000
 
