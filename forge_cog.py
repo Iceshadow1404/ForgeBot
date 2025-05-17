@@ -150,7 +150,7 @@ def create_forge_embed(profile_data: dict, formatted_items_string: str, page_num
     items_description = formatted_items_string if formatted_items_string else "No active items in Forge slots."
 
     embed = discord.Embed(
-        title=f"Forge Items for '{profile_data.get('profile_name', 'Unknown Profile')}' on '{profile_data.get('username', 'Unknown User')}'",
+        title=f"Forge Items for {profile_data.get('username', 'Unknown User')} on {profile_data.get('profile_name', 'Unknown Profile')}",
         description=items_description,
         color=discord.Color.blue()
     )
