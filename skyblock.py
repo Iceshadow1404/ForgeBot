@@ -19,6 +19,14 @@ def get_uuid(username):
         print(f"Error parsing UUID response for {username}: {e}")
         return None
 
+def uuid_to_username(uuid):
+    url = f"https://sessionserver.mojang.com/session/minecraft/profile/{uuid.replace('-', '')}"
+    response = requests.get(url)
+    if response.status_code == 200:
+        return response.json().get("name")
+    else:
+        return None
+
 # Helper function to format UUID with dashes (for Hypixel API)
 def format_uuid(uuid_str):
     """Formats a 32-character UUID string with dashes."""
