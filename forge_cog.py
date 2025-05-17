@@ -749,7 +749,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
             print(f"Unexpected exception sending combined webhook for user {discord_user_id}: {e}")
 
 
-    @tasks.loop(minutes=1)
+    @tasks.loop(minutes=5)
     async def check_forge_completions(self):
         """Periodically checks for completed forge items and sends combined notifications."""
         if not self.hypixel_api_key or not self.webhook_url:
