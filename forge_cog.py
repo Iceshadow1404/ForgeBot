@@ -601,14 +601,30 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
     def save_clock_usage(self):
         """Saves the current Enchanted Clock usage tracking data."""
         try:
+            if not os.path.exists(os.path.dirname(CLOCK_USAGE_FILE)):
+                print(f"DEBUG: Directory {os.path.dirname(CLOCK_USAGE_FILE)} does not exist. Creating...")
+                try:
+                    os.makedirs(os.path.dirname(CLOCK_USAGE_FILE), exist_ok=True)
+                except OSError as e:
+                    print(f"ERROR: Could not create directory: {e}")
+                    return  # Or raise an exception, depending on your error handling strategy
+
             os.makedirs(os.path.dirname(CLOCK_USAGE_FILE) or '.', exist_ok=True)
             temp_file = CLOCK_USAGE_FILE + ".tmp"
             with open(temp_file, 'w', encoding='utf-8') as f:
                 json.dump(self.clock_usage, f, indent=4)
             os.replace(temp_file, CLOCK_USAGE_FILE)
+            print(f"DEBUG: Successfully saved clock usage data to {CLOCK_USAGE_FILE}")  # Add success message
+        except PermissionError as pe:
+            print(f"ERROR: Permission error saving {CLOCK_USAGE_FILE}: {pe}")
+        except FileNotFoundError as fnfe:
+            print(f"ERROR: File not found error saving {CLOCK_USAGE_FILE}: {fnfe}")
+        except OSError as ose:
+            print(f"ERROR: OS error saving {CLOCK_USAGE_FILE}: {ose}")
+        except json.JSONDecodeError as json_error:
+            print(f"ERROR: JSON error saving {CLOCK_USAGE_FILE}: {json_error}")
         except Exception as e:
-            print(f"ERROR: Could not save {CLOCK_USAGE_FILE}: {e}")
-
+            print(f"ERROR: Unexpected error saving {CLOCK_USAGE_FILE}: {e}")
     # --- Clock Usage Logic ---
 
     def is_clock_used(self, uuid: str, profile_internal_id: str) -> bool:
