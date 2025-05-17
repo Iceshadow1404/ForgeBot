@@ -5,14 +5,9 @@ from discord import app_commands
 from discord.ext import commands
 import json
 import os
-import asyncio # For potential async file operations or locks later
 
-# Import necessary functions from skyblock.py
-# Ensure skyblock.py is accessible
 from skyblock import get_uuid, format_uuid, get_player_profiles, find_profile_by_name
-
-# Define the path to the registration data file
-from forge_cog import REGISTRATION_FILE
+from constants import REGISTRATION_FILE
 
 class RegistrationCog(commands.Cog, name="Registration Functions"):
     """
@@ -152,13 +147,6 @@ class RegistrationCog(commands.Cog, name="Registration Functions"):
         user_registrations = self.registrations[discord_user_id]
 
         if minecraft_username is None:
-            # Unregister all accounts for the user
-            # Add confirmation step
-            # For simplicity here, we'll just unregister without explicit confirmation.
-            # In a real bot, you'd ask for confirmation before clearing everything.
-            # For now, let's implement the non-username case as clearing all.
-            # A safer default might be to require username unless profile_name is also None.
-            # Let's refine: if username is None, user must want to clear ALL.
             if profile_name is not None:
                  await interaction.followup.send("You must provide a Minecraft username to unregister a specific profile.")
                  return
@@ -188,8 +176,6 @@ class RegistrationCog(commands.Cog, name="Registration Functions"):
             if profile_name in account_to_modify.get('profiles', []):
                 account_to_modify['profiles'].remove(profile_name)
                 message = f"Successfully unregistered profile '{profile_name}' from Minecraft account '{minecraft_username}'."
-                # Optional: If profiles list becomes empty, maybe remove the account entry?
-                # Decide on desired behavior. Keeping the empty list means defaulting to last played.
             else:
                 message = f"Profile '{profile_name}' was not registered for Minecraft account '{minecraft_username}'."
         else:

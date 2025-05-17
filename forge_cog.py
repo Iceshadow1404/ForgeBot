@@ -44,17 +44,8 @@ logger = logging.getLogger(__name__)
 
 # Import necessary functions from skyblock.py
 from skyblock import get_uuid, format_uuid, get_player_profiles, find_profile_by_name, uuid_to_username
+from constants import *
 
-BasePath = os.getenv("CONFIG_PATH", './')
-
-# Define file paths for persistent storage
-REGISTRATION_FILE = os.path.join(BasePath, "registrations.json")
-CLOCK_USAGE_FILE = os.path.join(BasePath, 'clock_usage.json')
-NOTIFICATIONS_FILE = os.path.join(BasePath, 'forge_notifications.json')
-
-
-# Define a constant for the Enchanted Clock reduction (1 hour in milliseconds)
-ENCHANTED_CLOCK_REDUCTION_MS = 60 * 60 * 1000
 
 # --- Helper Functions ---
 
