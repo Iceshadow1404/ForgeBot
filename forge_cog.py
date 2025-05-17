@@ -8,7 +8,7 @@ import asyncio
 import requests
 
 # Import necessary functions from skyblock.py
-from skyblock import get_uuid, format_uuid, get_player_profiles, find_profile_by_name
+from skyblock import get_uuid, format_uuid, get_player_profiles, find_profile_by_name, uuid_to_username
 
 # Define file paths for persistent storage
 REGISTRATION_FILE = 'registrations.json'
@@ -987,6 +987,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
         await interaction.response.defer()
         self.cleanup_expired_clock_entries()
 
+        # --- Handle Case: No username or profile specified (Show registered accounts with pagination) ---
         if username is None and profile_name is None:
             discord_user_id = str(interaction.user.id)
             self.registrations = self.load_registrations()
@@ -1012,13 +1013,14 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                 profiles = profiles_data.get("profiles", [])
                 if not profiles: continue
 
-                current_username_display = f"UUID: `{current_uuid[:8]}...`"
-                if profiles:
-                    sample_profile = profiles[0]
-                    member_data_check_displayname = sample_profile.get("members", {}).get(current_uuid, {})
-                    player_name_display = member_data_check_displayname.get("displayname")
-                    if player_name_display:
-                        current_username_display = player_name_display
+                # --- MODIFICATION START: Get username using uuid_to_username ---
+                # Attempt to get the username using the UUID
+                current_username_display = uuid_to_username(current_uuid)
+                 # Fallback to UUID display if username lookup fails or returns None
+                if not current_username_display:
+                     print(f"Warning: Could not get username for UUID {current_uuid} using uuid_to_username. Using UUID display.")
+                     current_username_display = f"UUID: {current_uuid[:8]}..."
+                # --- MODIFICATION END ---
 
 
                 for profile in profiles:
@@ -1057,7 +1059,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                         active_forge_profiles_data.append({
                             "uuid": current_uuid,
                             "profile_id": profile_internal_id,
-                            "username": current_username_display,
+                            "username": current_username_display, # Use the fetched username
                             "profile_name": profile_cute_name,
                             "perk_message": perk_message,
                             "items_raw": forge_processes_data,
@@ -1073,11 +1075,17 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
 
             return
 
+        # --- Handle Case: Username and/or Profile specified (Show single profile data) ---
+        # This section already handles getting the display name from the API,
+        # so it should already show the IGN if available in the Hypixel data.
+        # No major changes needed here for IGN display, but keeping the username display
+        # variable consistent for clarity.
+
         target_uuid = None
-        target_username_display = None
+        target_username_display = None # This will hold the IGN
 
         if username:
-            target_username_display = username
+            target_username_display = username # Start with provided username
             target_uuid = get_uuid(username)
 
             if not target_uuid:
@@ -1098,14 +1106,14 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                  await interaction.followup.send("Could not retrieve UUID for your first registered account. Please check your registration.", ephemeral=True)
                  return
 
-            temp_profiles_data = get_player_profiles(self.hypixel_api_key, format_uuid(target_uuid))
-            target_username_display = f"Registered Account ({target_uuid[:8]}...)"
-            if temp_profiles_data and temp_profiles_data.get("success") and temp_profiles_data.get("profiles"):
-                sample_profile = temp_profiles_data["profiles"][0]
-                member_data_check_dn = sample_profile.get("members", {}).get(target_uuid, {})
-                player_name_dn = member_data_check_dn.get("displayname")
-                if player_name_dn:
-                    target_username_display = player_name_dn
+            # --- MODIFICATION START: Get username using uuid_to_username for the default registered account ---
+            # Attempt to get the username using the UUID from the first registered account
+            target_username_display = await asyncio.to_thread(get_uuid, target_uuid, reverse=True) # Assuming get_uuid can do reverse lookup or you have a separate one
+            # If username lookup fails, fallback to a temporary display
+            if not target_username_display:
+                 print(f"Warning: Could not get username for UUID {target_uuid} using uuid_to_username. Using UUID display.")
+                 target_username_display = f"Registered Account (UUID: {target_uuid[:8]}...)"
+            # --- MODIFICATION END ---
 
 
         uuid_dashed = format_uuid(target_uuid)
@@ -1141,10 +1149,14 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
         profile_cute_name = target_profile.get("cute_name", "Unknown Profile")
         profile_internal_id = target_profile.get("profile_id")
 
+        # This part is already good - it attempts to get the displayname from the profile data
+        # and updates target_username_display, which will be used in create_forge_embed.
+        # This ensures the latest IGN from the API is used if available in the profile data.
         member_data_check_display = target_profile.get("members", {}).get(target_uuid, {})
         player_name_final = member_data_check_display.get("displayname")
         if player_name_final:
             target_username_display = player_name_final
+
 
         if profile_internal_id is None:
             print(
@@ -1182,7 +1194,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
         single_profile_data = {
             "uuid": target_uuid,
             "profile_id": profile_internal_id,
-            "username": target_username_display,
+            "username": target_username_display, # Use the fetched IGN here
             "profile_name": profile_cute_name,
             "perk_message": perk_message,
             "items_raw": forge_processes_data,

@@ -55,18 +55,6 @@ async def setup_hook():
 
 bot.setup_hook = setup_hook
 
-# Keep your other commands here if you want
-@bot.tree.command(name="test", description="Simply replies with True.")
-async def test_slash_command(interaction: discord.Interaction):
-    await interaction.response.send_message("True", ephemeral=True)
-    print(f"/test command executed by {interaction.user}.")
-
-@bot.tree.command(name="hello", description="Says hello to a user.")
-@discord.app_commands.describe(user="The user to say hello to")
-async def hello_slash_command(interaction: discord.Interaction, user: discord.Member):
-    await interaction.response.send_message(f"Hello {user.mention}!")
-    print(f"/hello command executed by {interaction.user} for {user.name}.")
-
 
 def startbot():
     if TOKEN is None:
