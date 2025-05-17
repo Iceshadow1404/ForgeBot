@@ -12,7 +12,7 @@ import asyncio # For potential async file operations or locks later
 from skyblock import get_uuid, format_uuid, get_player_profiles, find_profile_by_name
 
 # Define the path to the registration data file
-REGISTRATION_FILE = 'registrations.json'
+from forge_cog import REGISTRATION_FILE
 
 class RegistrationCog(commands.Cog, name="Registration Functions"):
     """
