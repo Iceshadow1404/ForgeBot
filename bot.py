@@ -68,7 +68,7 @@ async def hello_slash_command(interaction: discord.Interaction, user: discord.Me
     print(f"/hello command executed by {interaction.user} for {user.name}.")
 
 
-if __name__ == "__main__":
+def startbot():
     if TOKEN is None:
         print("ERROR: Discord Token not found. Ensure .env file is set up correctly and contains DISCORD_TOKEN.")
     else:
