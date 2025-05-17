@@ -94,6 +94,7 @@ def create_forge_embed(profile_data, formatted_items, page_number=None, total_pa
     items_description = formatted_items if formatted_items else "No active items in Forge slots."
 
     embed = discord.Embed(
+        # Use the username and profile name from the provided profile_data
         title=f"Forge Items for '{profile_data['profile_name']}' on '{profile_data['username']}'",
         description=items_description,
         color=discord.Color.blue() # You can choose a different color
@@ -158,12 +159,16 @@ class ForgePaginationView(discord.ui.View):
                          break
                  if has_active_items: break
 
-
-         # Create a unique key for the profile
-         profile_key = f"{current_profile_data['uuid']}_{current_profile_data['profile_name']}"
+         # Get the internal profile ID for the current profile
+         profile_internal_id = current_profile_data.get("profile_id")
+         profile_uuid = current_profile_data.get("uuid")
+         if profile_internal_id is None or profile_uuid is None:
+              # Should not happen if data is correctly populated, but as a safeguard
+              self.enchanted_clock_button.disabled = True
+              return
 
          # Disable clock if no active items or if marked as used and not expired in persistent storage
-         self.enchanted_clock_button.disabled = not has_active_items or self.clock_usage_cog_ref.is_clock_used(profile_key)
+         self.enchanted_clock_button.disabled = not has_active_items or self.clock_usage_cog_ref.is_clock_used(profile_uuid, profile_internal_id)
 
 
     @discord.ui.button(label="Prev", style=discord.ButtonStyle.blurple)
@@ -205,11 +210,16 @@ class ForgePaginationView(discord.ui.View):
         current_profile_index = self.current_page
         profile_data = self.forge_data_list[current_profile_index]
 
-        # Create a unique key for the profile
-        profile_key = f"{profile_data['uuid']}_{profile_data['profile_name']}"
+        # Get the internal profile ID for the current profile
+        profile_internal_id = profile_data.get("profile_id")
+        profile_uuid = profile_data.get("uuid")
+        if profile_internal_id is None or profile_uuid is None:
+             await interaction.followup.send("Could not identify profile for clock application.", ephemeral=True)
+             return
+
 
         # Check persistent storage if the clock was already used for this profile and is not expired
-        if self.clock_usage_cog_ref.is_clock_used(profile_key):
+        if self.clock_usage_cog_ref.is_clock_used(profile_uuid, profile_internal_id):
              await interaction.followup.send("The Enchanted Clock has already been used for this profile.", ephemeral=True)
              return
 
@@ -229,9 +239,6 @@ class ForgePaginationView(discord.ui.View):
 
         if not has_active_items_now:
              await interaction.followup.send("No active items in the Forge for this profile to apply the clock to.", ephemeral=True)
-             # Optional: If the clock was marked as used but now forge is empty, reset it here too
-             # self.clock_usage_cog_ref.reset_clock_usage(profile_key)
-             # self.update_clock_button_state() # Update button state
              return
 
 
@@ -241,7 +248,7 @@ class ForgePaginationView(discord.ui.View):
 
         # Apply the persistent clock buff and recalculate remaining times
         # Mark clock as used *before* recalculating and updating Embed
-        self.clock_usage_cog_ref.mark_clock_used(profile_key)
+        self.clock_usage_cog_ref.mark_clock_used(profile_uuid, profile_internal_id, profile_data.get("profile_name", "Unknown Profile"))
         clock_applied_to_items = True # Clock is considered applied if button is clickable and forge had items
 
         for forge_type_key in sorted(raw_forge_processes.keys()):
@@ -259,7 +266,7 @@ class ForgePaginationView(discord.ui.View):
                     item_name = item_id
                     remaining_time_str = "Time unknown"
 
-                    forge_item_info = self.forge_items_config.get(item_id)
+                    forge_item_info = self.forge_items_config.get(item_id) # FIX: Corrected attribute name here
 
                     if forge_item_info:
                         item_name = forge_item_info.get("name", item_id)
@@ -277,8 +284,11 @@ class ForgePaginationView(discord.ui.View):
                             remaining_time_str = format_time_difference(remaining_time_ms)
                         else:
                             remaining_time_str = "Duration unknown (JSON)"
-                    else:
-                        remaining_time_str = "Duration unknown (Item data missing)"
+
+                    elif start_time_ms is None:
+                         remaining_time_str = "Start time unknown (API)"
+                    else: # No forge_item_info found for the item_id
+                         remaining_time_str = "Duration unknown (Item data missing)"
 
                     updated_formatted_items.append(f"Slot {slot} ({forge_type_key.replace('_', ' ').title()}): {item_name} - Remaining: {remaining_time_str}")
 
@@ -298,11 +308,10 @@ class ForgePaginationView(discord.ui.View):
              # Update button state (disabling the clock button for this profile)
              self.update_clock_button_state()
 
-             await self.interaction.edit_original_response(embed=self.embeds[current_profile_index], view=self)
+             await self.interaction.edit_original_response(embed=self.embeds[self.current_page], view=self)
              # Optional: Send a confirmation message ephemerally
              # await interaction.followup.send("Enchanted Clock applied!", ephemeral=True)
         else:
-             # This else block should ideally not be reached if the initial check passes
              await interaction.followup.send("Failed to apply Enchanted Clock.", ephemeral=True)
 
 
@@ -317,14 +326,15 @@ class ForgePaginationView(discord.ui.View):
         except Exception as e:
              print(f"Error updating view on timeout: {e}")
 
-# Define a single profile view (for /forge username)
+# Define a single profile view (for /forge username or /forge profile_name)
 class SingleForgeView(discord.ui.View):
-    def __init__(self, profile_data: dict, interaction: discord.Interaction, forge_items_config: dict, clock_usage_cog_ref, timeout=180):
+    def __init__(self, profile_data: dict, interaction: discord.Interaction, forge_items_config: dict, clock_usage_cog_ref, formatted_items: str, timeout=180):
         super().__init__(timeout=timeout)
         self.profile_data = profile_data # Dictionary with profile forge data
         self.interaction = interaction # Store the original interaction
         self.forge_items_config = forge_items_config
         self.clock_usage_cog_ref = clock_usage_cog_ref
+        self.formatted_items = formatted_items # Store initially formatted items
 
         # Initially check and disable clock button based on persistent state
         self.update_clock_button_state()
@@ -343,11 +353,15 @@ class SingleForgeView(discord.ui.View):
                          break
                  if has_active_items: break
 
-         # Create a unique key for the profile
-         profile_key = f"{self.profile_data['uuid']}_{self.profile_data['profile_name']}"
+         # Get the internal profile ID for the profile
+         profile_internal_id = self.profile_data.get("profile_id")
+         profile_uuid = self.profile_data.get("uuid")
+         if profile_internal_id is None or profile_uuid is None:
+              self.enchanted_clock_button.disabled = True
+              return
 
          # Disable clock if no active items or if marked as used and not expired
-         self.enchanted_clock_button.disabled = not has_active_items or self.clock_usage_cog_ref.is_clock_used(profile_key)
+         self.enchanted_clock_button.disabled = not has_active_items or self.clock_usage_cog_ref.is_clock_used(profile_uuid, profile_internal_id)
 
 
     @discord.ui.button(label="Enchanted Clock", style=discord.ButtonStyle.green)
@@ -361,11 +375,15 @@ class SingleForgeView(discord.ui.View):
 
         profile_data = self.profile_data
 
-        # Create a unique key for the profile
-        profile_key = f"{profile_data['uuid']}_{profile_data['profile_name']}"
+        # Get the internal profile ID for the profile
+        profile_internal_id = profile_data.get("profile_id")
+        profile_uuid = profile_data.get("uuid")
+        if profile_internal_id is None or profile_uuid is None:
+             await interaction.followup.send("Could not identify profile for clock application.", ephemeral=True)
+             return
 
         # Check persistent storage if the clock was already used for this profile and is not expired
-        if self.clock_usage_cog_ref.is_clock_used(profile_key):
+        if self.clock_usage_cog_ref.is_clock_used(profile_uuid, profile_internal_id):
              await interaction.followup.send("The Enchanted Clock has already been used for this profile.", ephemeral=True)
              return
 
@@ -383,6 +401,7 @@ class SingleForgeView(discord.ui.View):
                         break
                 if has_active_items_now: break
 
+
         if not has_active_items_now:
              await interaction.followup.send("No active items in the Forge for this profile to apply the clock to.", ephemeral=True)
              return
@@ -394,7 +413,7 @@ class SingleForgeView(discord.ui.View):
 
         # Apply the persistent clock buff and recalculate remaining times
         # Mark clock as used *before* recalculating and updating Embed
-        self.clock_usage_cog_ref.mark_clock_used(profile_key)
+        self.clock_usage_cog_ref.mark_clock_used(profile_uuid, profile_internal_id, profile_data.get("profile_name", "Unknown Profile"))
         clock_applied_to_items = True # Clock is considered applied if button is clickable and forge had items
 
 
@@ -413,7 +432,7 @@ class SingleForgeView(discord.ui.View):
                     item_name = item_id
                     remaining_time_str = "Time unknown"
 
-                    forge_item_info = self.forge_items_config.get(item_id)
+                    forge_item_info = self.forge_items_config.get(item_id) # FIX: Corrected attribute name here
 
                     if forge_item_info:
                         item_name = forge_item_info.get("name", item_id)
@@ -440,14 +459,17 @@ class SingleForgeView(discord.ui.View):
 
 
         if clock_applied_to_items:
-             # Re-create the Embed for the current page with updated formatted items
+             # Update the stored formatted items for this page
+             self.formatted_items = "\n".join(updated_formatted_items)
+
+             # Re-create the Embed with updated formatted items
              embed = create_forge_embed(
                  profile_data,
-                 "\n".join(updated_formatted_items),
+                 self.formatted_items, # Use updated formatted items
                  None, None # No pagination footer for single view
              )
 
-             # Add a note to the single Embed if the clock buff is applied
+             # Add a note to the single Embed since the clock buff is now applied
              clock_note = "\n*Enchanted Clock buff applied.*"
              embed.description = embed.description + clock_note
 
@@ -476,7 +498,7 @@ class SingleForgeView(discord.ui.View):
 class ForgeCog(commands.Cog, name="Forge Functions"):
     """
     This cog handles commands related to the Skyblock Forge.
-    Manages persistent Enchanted Clock usage data.
+    Manages persistent Enchanted Clock usage data using internal profile IDs.
     """
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -530,6 +552,30 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                 if not isinstance(data, dict):
                     print(f"ERROR: {CLOCK_USAGE_FILE} content is not a dictionary. Starting with empty data.")
                     return {}
+                # Ensure the nested structure is also dictionaries and has required keys
+                uuids_to_delete = []
+                for uuid, profiles in list(data.items()): # Use list() to iterate safely while modifying
+                     if not isinstance(profiles, dict):
+                          print(f"ERROR: Data for UUID {uuid} in {CLOCK_USAGE_FILE} is not a dictionary. Clearing data for this UUID.")
+                          uuids_to_delete.append(uuid)
+                          continue
+                     profile_ids_to_delete = []
+                     for profile_id, profile_data in list(profiles.items()): # Use list() here too
+                          # Check for required keys and correct types
+                          if not isinstance(profile_data, dict) or "end_timestamp" not in profile_data or not isinstance(profile_data.get("end_timestamp"), (int, float)) or "profile_name" not in profile_data or not isinstance(profile_data.get("profile_name"), str):
+                               print(f"ERROR: Data for profile {profile_id} under UUID {uuid} is corrupt. Clearing this profile entry.")
+                               profile_ids_to_delete.append(profile_id)
+
+                     for profile_id in profile_ids_to_delete:
+                          del profiles[profile_id]
+
+                     # If the UUID entry is now empty, mark it for deletion
+                     if not profiles:
+                          uuids_to_delete.append(uuid)
+
+                for uuid in uuids_to_delete:
+                    del data[uuid]
+
                 return data
         except json.JSONDecodeError:
             print(f"ERROR: Could not decode {CLOCK_USAGE_FILE}. File might be corrupt. Starting with empty data.")
@@ -538,9 +584,12 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
             print(f"An unexpected error occurred loading {CLOCK_USAGE_FILE}: {e}")
             return {}
 
+
     def save_clock_usage(self):
         """Saves persistent clock usage data to the JSON file."""
         try:
+            # Ensure directory exists if saving for the first time
+            os.makedirs(os.path.dirname(CLOCK_USAGE_FILE) or '.', exist_ok=True)
             temp_file = CLOCK_USAGE_FILE + ".tmp"
             with open(temp_file, 'w', encoding='utf-8') as f:
                 json.dump(self.clock_usage, f, indent=4)
@@ -549,48 +598,37 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
         except Exception as e:
             print(f"ERROR: Could not save {CLOCK_USAGE_FILE}: {e}")
 
-    def is_clock_used(self, profile_key: str) -> bool:
+    def is_clock_used(self, uuid: str, profile_internal_id: str) -> bool:
         """Checks if the clock is marked as used and not expired for a profile in persistent storage."""
-        clock_data = self.clock_usage.get(profile_key)
-        if clock_data:
-            end_timestamp = clock_data.get("end_timestamp")
+        profile_data = self.clock_usage.get(uuid, {}).get(profile_internal_id)
+        if profile_data:
+            end_timestamp = profile_data.get("end_timestamp")
             if end_timestamp is not None:
                 current_time_ms = time.time() * 1000
                 return current_time_ms < end_timestamp
         return False # Not found or timestamp missing/expired
 
-    def mark_clock_used(self, profile_key: str):
+    def mark_clock_used(self, uuid: str, profile_internal_id: str, profile_cute_name: str):
         """Marks the clock as used for a profile with an expiry timestamp and saves."""
         current_time_ms = time.time() * 1000
         end_timestamp = current_time_ms + ENCHANTED_CLOCK_REDUCTION_MS # Buff lasts for 1 hour from now
 
-        # Store relevant data for the profile
-        # We need UUID and profile_name to potentially reset later or display info
-        # We can get this from the profile_key, but storing explicitly might be cleaner.
-        # Let's update the clock_usage format slightly to store UUID and profile_name too.
-        # This requires changes in load/save as well.
-        # Okay, let's keep the key as UUID_ProfileName for lookup efficiency
-        # and store the end_timestamp in the value.
-        # The profile_key already implicitly contains UUID and profile_name.
-        # We'll store just the end timestamp for simplicity in the value.
-        # Format: {"uuid_profilename": end_timestamp_ms}
-        # Reverting to a simpler value format, the profile key has the necessary info.
-        # Let's update load/save/is_clock_used/reset accordingly.
-        # The previous format {"uuid_profile": {"uuid": "...", "profile_name": "...", "end_timestamp": ...}} was better for storing profile info explicitly.
-        # Let's stick to the {"uuid_profile": {"end_timestamp": ...}} format for simplicity,
-        # assuming we can reconstruct UUID and profile name from the key if needed,
-        # or just rely on the key for storage.
+        if uuid not in self.clock_usage:
+             self.clock_usage[uuid] = {}
 
-        # Let's use the {"uuid_profile": {"end_timestamp": ...}} format as initially planned.
-        # This requires updating load/save. Done that.
-
-        self.clock_usage[profile_key] = {"end_timestamp": end_timestamp}
+        self.clock_usage[uuid][profile_internal_id] = {
+            "profile_name": profile_cute_name,
+            "end_timestamp": end_timestamp
+        }
         self.save_clock_usage()
 
-    def reset_clock_usage(self, profile_key: str):
+    def reset_clock_usage(self, uuid: str, profile_internal_id: str):
         """Resets the clock usage state for a profile by removing the entry and saves."""
-        if profile_key in self.clock_usage:
-            del self.clock_usage[profile_key]
+        if uuid in self.clock_usage and profile_internal_id in self.clock_usage.get(uuid, {}): # Use .get for safety
+            del self.clock_usage[uuid][profile_internal_id]
+            # If the UUID now has no profiles with clock usage, remove the UUID entry
+            if not self.clock_usage[uuid]:
+                 del self.clock_usage[uuid]
             self.save_clock_usage()
 
 
@@ -600,24 +638,55 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
         # Reload data on ready
         self.registrations = self.load_registrations()
         self.clock_usage = self.load_clock_usage()
-        # Clean up expired entries on startup (optional but good)
+        # Clean up expired entries on startup
         self.cleanup_expired_clock_entries()
 
 
     def cleanup_expired_clock_entries(self):
         """Removes expired clock usage entries from storage."""
         current_time_ms = time.time() * 1000
-        keys_to_delete = []
-        for profile_key, data in self.clock_usage.items():
-             end_timestamp = data.get("end_timestamp")
-             if end_timestamp is None or current_time_ms >= end_timestamp:
-                  keys_to_delete.append(profile_key)
+        uuids_to_delete = []
+        modified = False # Flag to indicate if clock_usage was modified
 
-        if keys_to_delete:
-             for key in keys_to_delete:
-                  del self.clock_usage[key]
+        # Create a list of UUIDs to process to avoid issues with deleting keys during iteration
+        for uuid in list(self.clock_usage.keys()):
+             profiles = self.clock_usage.get(uuid, {}) # Use .get for safety
+             if not isinstance(profiles, dict): # Should be handled by load, but extra check
+                  uuids_to_delete.append(uuid)
+                  modified = True
+                  continue
+
+             profile_ids_to_delete = []
+             # Create a list of profile IDs to process for the current UUID
+             for profile_id in list(profiles.keys()):
+                  profile_data = profiles.get(profile_id) # Use .get for safety
+                  if not isinstance(profile_data, dict) or "end_timestamp" not in profile_data or not isinstance(profile_data.get("end_timestamp"), (int, float)):
+                       profile_ids_to_delete.append(profile_id)
+                       modified = True
+                       continue # Go to next profile_id
+
+                  end_timestamp = profile_data.get("end_timestamp")
+                  if current_time_ms >= end_timestamp:
+                       profile_ids_to_delete.append(profile_id)
+                       modified = True
+
+             for profile_id in profile_ids_to_delete:
+                  del profiles[profile_id]
+
+             # If the UUID entry is now empty, mark it for deletion
+             if not profiles:
+                  uuids_to_delete.append(uuid)
+                  modified = True
+
+
+        for uuid in uuids_to_delete:
+             if uuid in self.clock_usage: # Check again for safety
+                 del self.clock_usage[uuid]
+
+
+        if modified:
              self.save_clock_usage()
-             print(f"Cleaned up {len(keys_to_delete)} expired clock usage entries.")
+             # print("Cleaned up expired clock usage entries.") # Optional log
 
 
     @app_commands.command(name="forge", description="Shows the items currently in your registered or a specified player's Skyblock Forge.")
@@ -629,7 +698,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
         - If no username or profile_name is provided, lists all active forges across registered accounts in an interactive Embed view.
         - If username is provided, targets that player. Defaults to their latest profile if no profile_name.
         - If profile_name is provided (with or without username), targets that specific profile.
-        Includes persistent Enchanted Clock usage tracking.
+        Includes persistent Enchanted Clock usage tracking based on internal profile ID.
         """
         if not self.hypixel_api_key:
             await interaction.response.send_message(
@@ -640,7 +709,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
 
         await interaction.response.defer()
 
-        # Clean up expired entries at the start of the command (in case bot was off)
+        # Clean up expired entries at the start of the command
         self.cleanup_expired_clock_entries()
 
 
@@ -689,7 +758,12 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                 # Check each profile of this account for active forge items
                 for profile in profiles:
                      profile_cute_name = profile.get("cute_name", "Unknown Profile")
-                     profile_key = f"{current_uuid}_{profile_cute_name}" # Unique key for this profile
+                     profile_internal_id = profile.get("profile_id") # Get the stable internal profile ID
+
+                     if profile_internal_id is None:
+                          print(f"Warning: Profile {profile_cute_name} for UUID {current_uuid} is missing 'profile_id'. Skipping for clock tracking.")
+                          continue # Cannot reliably track clock usage without internal ID
+
 
                      member_data = profile.get("members", {}).get(current_uuid, {})
                      forge_processes_data = member_data.get("forge", {}).get("forge_processes", {})
@@ -717,8 +791,9 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
 
                          active_forge_profiles_data.append({
                              "uuid": current_uuid,
+                             "profile_id": profile_internal_id, # Store internal ID
                              "username": current_username_display, # Use the display name
-                             "profile_name": profile_cute_name,
+                             "profile_name": profile_cute_name, # Store cute name for display
                              "perk_message": perk_applied_message,
                              "items_raw": forge_processes_data, # Store raw data for recalculation
                              "time_reduction_percent": time_reduction_percent,
@@ -734,10 +809,12 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                       formatted_items = []
                       raw_forge_processes = profile_data["items_raw"]
                       time_reduction_percent = profile_data["time_reduction_percent"]
-                      profile_key = f"{profile_data['uuid']}_{profile_data['profile_name']}"
+                      profile_uuid = profile_data["uuid"]
+                      profile_internal_id = profile_data["profile_id"]
+
 
                       # Check if clock was used for this profile and is not expired
-                      clock_is_actively_buffing = self.is_clock_used(profile_key)
+                      clock_is_actively_buffing = self.is_clock_used(profile_uuid, profile_internal_id)
 
 
                       for forge_type_key in sorted(raw_forge_processes.keys()):
@@ -785,7 +862,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                  view = ForgePaginationView(
                      forge_data_list=active_forge_profiles_data,
                      interaction=interaction,
-                     forge_items_config=self.forge_items_data,
+                     forge_items_config=self.forge_items_data, # Passed to the view
                      clock_usage_cog_ref=self # Pass reference to the cog
                      )
 
@@ -799,7 +876,11 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
         # --- END Case 1 ---
 
 
-        # --- Case 2 or 3: Username or Profile Name IS provided ---
+        # --- Cases 2 and 3: Username or Profile Name IS provided (Single Profile View) ---
+        # This block handles both:
+        # Case 2: username provided, profile_name is None (defaults to latest)
+        # Case 3: profile_name is provided (with or without username)
+
         target_uuid = None
         target_username_display = None # Variable to store the name for the final message
 
@@ -831,16 +912,16 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
         uuid_dashed = format_uuid(target_uuid)
 
         # 2. Get Skyblock profiles for the target UUID
-        profiles_data = get_player_profiles(self.hypixel_api_key, uuid_dashed)
+        profiles_data_full = get_player_profiles(self.hypixel_api_key, uuid_dashed)
 
-        if not profiles_data or not profiles_data.get("success", False):
+        if not profiles_data_full or not profiles_data_full.get("success", False):
             error_message = "Failed to retrieve Skyblock profiles."
-            if profiles_data and profiles_data.get("cause"):
-                 error_message += f" Reason: {profiles_data['cause']}"
+            if profiles_data_full and profiles_data_full.get("cause"):
+                 error_message += f" Reason: {profiles_data_full['cause']}"
             await interaction.followup.send(f"{error_message} for {target_username_display}.")
             return
 
-        profiles = profiles_data.get("profiles", [])
+        profiles = profiles_data_full.get("profiles", [])
         if not profiles:
             await interaction.followup.send(f"No Skyblock profiles found for {target_username_display}.")
             return
@@ -848,22 +929,14 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
         # 3. Find the target profile based on profile_name or default to latest
         target_profile = None
         profile_cute_name = None
+        profile_internal_id = None # Get the internal ID here too
 
         if profile_name:
-            # Case 3a: Profile name was provided, find that specific profile
-            target_profile = find_profile_by_name(profiles_data, profile_name)
+            # Case 3: Profile name was provided, find that specific profile
+            target_profile = find_profile_by_name(profiles_data_full, profile_name)
             if not target_profile:
                 await interaction.followup.send(f"Profile '{profile_name}' not found for {target_username_display}.")
                 return
-            profile_cute_name = target_profile.get("cute_name", profile_name)
-            # If username was provided but profile_name was also provided, update display name
-            member_data_check_display_targeted = target_profile.get("members", {}).get(target_uuid, {})
-            player_name_in_profile_targeted = member_data_check_display_targeted.get("displayname")
-            if player_name_in_profile_targeted:
-                 target_username_display = player_name_in_profile_targeted
-
-            # Proceed to display single Embed without clock button
-
         else:
             # Case 2: No profile name provided, find the last played profile for this UUID
             last_save_timestamp = 0
@@ -881,14 +954,20 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                  await interaction.followup.send(f"Could not determine the last played profile for {target_username_display}.")
                  return
 
-            profile_cute_name = target_profile.get("cute_name", "Unknown Profile")
-            # Update display name if found in the latest profile data
-            member_data_check_display_targeted = target_profile.get("members", {}).get(target_uuid, {})
-            player_name_in_profile_targeted = member_data_check_display_targeted.get("displayname")
-            if player_name_in_profile_targeted:
-                 target_username_display = player_name_in_profile_targeted
+        profile_cute_name = target_profile.get("cute_name", "Unknown Profile")
+        profile_internal_id = target_profile.get("profile_id")
 
-            # Proceed to display single Embed WITH clock button (Case 2)
+        # Update display name if found in the targeted profile data
+        member_data_check_display_targeted = target_profile.get("members", {}).get(target_uuid, {})
+        player_name_in_profile_targeted = member_data_check_display_targeted.get("displayname")
+        if player_name_in_profile_targeted:
+             target_username_display = player_name_in_profile_targeted
+
+
+        if profile_internal_id is None:
+             # If we couldn't get the internal ID for the targeted profile, can't offer clock buff
+             # Still show the forge data, just without the clock button functionality
+             print(f"Warning: Could not get internal profile ID for '{profile_cute_name}' ({target_uuid}). Cannot offer Enchanted Clock buff for this view.")
 
 
         # 4. Get Quick Forge Perk Level and calculate reduction
@@ -907,9 +986,12 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
             forge_items_output = []
             current_time_ms = time.time() * 1000
 
-            # Determine if clock was used for this specific profile in persistent storage
-            profile_key_single = f"{target_uuid}_{profile_cute_name}"
-            clock_is_actively_buffing_single = self.is_clock_used(profile_key_single)
+            # Determine if clock was used for this specific profile and is not expired
+            # Only check if we have the internal profile ID
+            clock_is_actively_buffing_single = False
+            if profile_internal_id:
+                 clock_is_actively_buffing_single = self.is_clock_used(target_uuid, profile_internal_id)
+
 
             # Check if there are any active items to potentially show the clock button for
             has_any_active_items_single = False
@@ -924,7 +1006,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
 
 
             if not forge_processes_data:
-                 # If no forge data at all, send basic message
+                 # If no forge data at all, send basic message without view
                 await interaction.followup.send(f"No active items found in the Forge on profile '{profile_cute_name}' of '{target_username_display}'{perk_applied_message}.")
                 return
 
@@ -970,9 +1052,11 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                     if start_time_ms is not None: # Only add items that are actually active
                          forge_items_output.append(f"Slot {slot} ({forge_type_key.replace('_', ' ').title()}): {item_name} - Remaining: {remaining_time_str}")
 
+
             # Create profile data dictionary for creating the embed/view
             single_profile_data = {
                 "uuid": target_uuid,
+                "profile_id": profile_internal_id, # Include internal ID
                 "username": target_username_display,
                 "profile_name": profile_cute_name,
                 "perk_message": perk_applied_message,
@@ -980,17 +1064,10 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                 "time_reduction_percent": time_reduction_percent,
             }
 
-
-            if not forge_items_output:
-                 # If forge data exists but no *active* items, send a message
-                 await interaction.followup.send(f"No active items found in the Forge on profile '{profile_cute_name}' of '{target_username_display}'{perk_applied_message}.")
-                 return
-
-
-            # Create the Embed for the single view
+            # Create the Embed for the single view using the initial formatted items
             embed = create_forge_embed(
                  single_profile_data,
-                 "\n".join(forge_items_output),
+                 "\n".join(forge_items_output) if forge_items_output else "No active items found in the Forge.",
                  None, None # No pagination footer
              )
 
@@ -999,26 +1076,17 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                  clock_note = "\n*Enchanted Clock buff applied.*"
                  embed.description = embed.description + clock_note
 
+            # --- Always use SingleForgeView if a profile was successfully found ---
+            # The view will handle enabling/disabling the button based on data
+            view = SingleForgeView(
+                 profile_data=single_profile_data,
+                 interaction=interaction,
+                 forge_items_config=self.forge_items_data, # Passed to the view
+                 clock_usage_cog_ref=self,
+                 formatted_items="\n".join(forge_items_output) if forge_items_output else "" # Pass initial formatted items
+             )
 
-            # --- Determine whether to show the Clock button ---
-            if username is not None and profile_name is None:
-                 # Case 2: Username provided, no profile_name (defaulting to latest)
-                 # Show the clock button if there are active items and it's not used/expired
-                 if has_any_active_items_single and not self.is_clock_used(profile_key_single):
-                      view = SingleForgeView(
-                           profile_data=single_profile_data,
-                           interaction=interaction,
-                           forge_items_config=self.forge_items_data,
-                           clock_usage_cog_ref=self
-                      )
-                      await interaction.followup.send(embed=embed, view=view)
-                 else:
-                      # No active items or clock already used, just send the embed without button
-                      await interaction.followup.send(embed=embed)
-            else:
-                 # Case 3: Profile name provided (with or without username)
-                 # Don't show the clock button
-                 await interaction.followup.send(embed=embed)
+            await interaction.followup.send(embed=embed, view=view)
 
 
         except Exception as e:
