@@ -1,3 +1,5 @@
+# forge_cog.py
+
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -5,20 +7,22 @@ import time
 import json
 import asyncio
 import requests
+import os
 
 from embed import create_forge_embed, ForgePaginationView, SingleForgeView
 from skyblock import get_uuid, format_uuid, get_player_profiles, find_profile_by_name, uuid_to_username
 from constants import *
 from logs import logger
 from utils import format_time_difference
+# Import the new notification manager class
+from forge_notifications import ForgeNotificationManager
 
+# --- Helper Functions (Kept in forge_cog.py as they are used by the command) ---
 
-# --- Helper Functions ---
 def calculate_quick_forge_reduction(forge_time_level: int | None) -> float:
     """
     Calculates Quick Forge time reduction percentage based on tier level.
     """
-    # logger.debug(f"Entering calculate_quick_forge_reduction with level: {forge_time_level}")
     tier_percentages = [
         10.5, 11.0, 11.5, 12.0, 12.5, 13.0, 13.5, 14.0, 14.5, 15.0,
         15.5, 16.0, 16.5, 17.0, 17.5, 18.0, 18.5, 19.0, 19.5
@@ -26,30 +30,26 @@ def calculate_quick_forge_reduction(forge_time_level: int | None) -> float:
     max_reduction = 30.0
 
     if forge_time_level is None or forge_time_level < 1:
-        # logger.debug("calculate_quick_forge_reduction returning 0.0 (level None or < 1)")
         return 0.0
 
     level = int(forge_time_level)
 
     if level >= 20:
-        # logger.debug("calculate_quick_forge_reduction returning max_reduction (level >= 20)")
         return max_reduction
     elif 1 <= level <= len(tier_percentages):
-        # logger.debug(f"calculate_quick_forge_reduction returning {tier_percentages[level - 1]} (level in range)")
         return tier_percentages[level - 1]
     else:
         logger.warning(f"Unexpected forge_time_level: {level}. Returning 0%.")
-        # logger.debug("calculate_quick_forge_reduction returning 0.0 (unexpected level)")
         return 0.0
-
 
 def format_active_forge_items(forge_processes_data: dict, forge_items_config: dict, time_reduction_percent: float,
                               clock_is_actively_buffing: bool) -> list[str]:
     """
     Formats the active forge items with remaining times, applying buffs.
     Returns a list of formatted strings, one for each active item.
+    This version is for displaying in the /forge command.
     """
-    logger.debug(f"Entering format_active_forge_items. Reduction: {time_reduction_percent}%, Clock Active: {clock_is_actively_buffing}")
+    logger.debug(f"Entering format_active_forge_items for command. Reduction: {time_reduction_percent}%, Clock Active: {clock_is_actively_buffing}")
     forge_items_output = []
     current_time_ms = time.time() * 1000
 
@@ -119,13 +119,12 @@ def format_active_forge_items(forge_processes_data: dict, forge_items_config: di
 
 
             forge_items_output.append(
-                f"Slot {slot}: {item_name} - Remaining: {remaining_time_str}")
+                f"Slot {slot} ({forge_type_key.replace('_', ' ').title()}): {item_name} - Remaining: {remaining_time_str}")
             logger.debug(f"Added formatted item: {forge_items_output[-1]}")
 
 
-    logger.debug(f"Exiting format_active_forge_items. Returning {len(forge_items_output)} items.")
+    logger.debug(f"Exiting format_active_forge_items for command. Returning {len(forge_items_output)} items.")
     return forge_items_output
-
 
 
 # --- Main Cog Class ---
@@ -143,23 +142,31 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
         else:
             logger.info("HYPIXEL_API_KEY found.")
 
+        self.webhook_url = os.getenv("WEBHOOK_URL") # Keep webhook_url here as it's needed for the manager init
 
         self.forge_items_data = self.load_forge_items_data()
-        self.registrations = self.load_registrations()
-        self.clock_usage = self.load_clock_usage()
+        # Registrations will be loaded/managed by the Notification Manager for its task,
+        # but we keep load_registrations here for the command's default behavior.
+        self.registrations = self.load_registrations() # Load initial registrations for command
 
-        # --- Notifications Setup ---
-        self.webhook_url = os.getenv("WEBHOOK_URL")
-        if not self.webhook_url:
-            logger.warning("WEBHOOK_URL not found. Forge notifications will not be sent.")
-        else:
-            logger.info("WEBHOOK_URL found.")
-        self.notifications_status = self.load_notifications_status()
-        # --- End Notifications Setup ---
+
+        self.clock_usage = self.load_clock_usage() # Keep clock usage in ForgeCog
+
+        # Instantiate the Notification Manager
+        self.notification_manager = ForgeNotificationManager(
+            bot=self.bot,
+            hypixel_api_key=self.hypixel_api_key,
+            webhook_url=self.webhook_url,
+            forge_items_data=self.forge_items_data,
+            forge_cog_ref=self # Pass reference to self
+        )
+
         logger.info("ForgeCog initialized.")
 
 
     # --- Data Loading and Saving ---
+    # (Keep load_forge_items_data, load_registrations, load_clock_usage, save_clock_usage here)
+    # load_notifications_status and save_notifications_status are moved to ForgeNotificationManager
 
     def load_forge_items_data(self) -> dict:
         """Loads forge item configuration data from 'forge_items.json'."""
@@ -181,10 +188,10 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
             return {}
 
     def load_registrations(self) -> dict:
-        """Loads user registration data from REGISTRATION_FILE."""
-        logger.debug(f"Loading registrations from {REGISTRATION_FILE}...")
+        """Loads user registration data from REGISTRATION_FILE. Kept for command use."""
+        logger.debug(f"Loading registrations from {REGISTRATION_FILE} for command...")
         if not os.path.exists(REGISTRATION_FILE):
-            logger.info(f"Registration file not found: {REGISTRATION_FILE}. Starting with empty data.")
+            logger.info(f"Registration file not found: {REGISTRATION_FILE}. Starting with empty data for command.")
             return {}
         try:
             with open(REGISTRATION_FILE, 'r', encoding='utf-8') as f:
@@ -192,27 +199,32 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
 
             cleaned_data = {}
             if not isinstance(data, dict):
-                 logger.warning(f"Invalid data format in {REGISTRATION_FILE}. Expected dictionary.")
+                 logger.warning(f"Invalid data format in {REGISTRATION_FILE}. Expected dictionary for command. Starting fresh.")
                  return {}
 
             for user_id, accounts in data.items():
                 if isinstance(user_id, str) and isinstance(accounts, list):
+                     # Add debug log for each user loaded
+                    logger.debug(f"Loaded user {user_id} from {REGISTRATION_FILE} for command.")
                     cleaned_accounts = []
                     for account in accounts:
                         if isinstance(account, dict) and account.get('uuid') is not None:
+                             # Add debug log for each UUID loaded
+                            logger.debug(f"Loaded UUID {account['uuid']} for user {user_id}.")
                             cleaned_accounts.append(account)
                         else:
-                            logger.warning(f"Invalid account entry found for user {user_id}: {account}. Skipping.")
+                            logger.warning(f"Invalid account entry found for user {user_id} in registrations (command): {account}. Skipping.")
                     if cleaned_accounts:
                         cleaned_data[user_id] = cleaned_accounts
                 else:
-                     logger.warning(f"Invalid registration format for user {user_id}: {accounts}. Skipping.")
+                     logger.warning(f"Invalid registration format for user {user_id} (command): {accounts}. Skipping.")
 
-            logger.info(f"Registrations loaded successfully from {REGISTRATION_FILE}. Loaded {len(cleaned_data)} users.")
+            logger.info(f"Registrations loaded successfully from {REGISTRATION_FILE} for command. Loaded {len(cleaned_data)} users.")
             return cleaned_data
         except (json.JSONDecodeError, Exception) as e:
-            logger.error(f"Could not load {REGISTRATION_FILE}: {e}. Assuming empty registrations.", exc_info=True)
+            logger.error(f"Could not load {REGISTRATION_FILE} for command: {e}. Assuming empty registrations.", exc_info=True)
             return {}
+
 
     def load_clock_usage(self) -> dict:
         """Loads Enchanted Clock usage tracking data from CLOCK_USAGE_FILE."""
@@ -236,7 +248,8 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                         if (isinstance(profile_id, str) and isinstance(p_data, dict) and
                             p_data.get("end_timestamp") is not None and isinstance(p_data.get("end_timestamp"), (int, float)) and
                             p_data.get("profile_name") is not None and isinstance(p_data.get("profile_name"), str)):
-                            cleaned_profiles[profile_id] = p_data
+                             logger.debug(f"Loaded clock usage for UUID {uuid}, Profile {profile_id}.")
+                             cleaned_profiles[profile_id] = p_data
                         else:
                              logger.warning(f"Invalid clock usage entry found for UUID {uuid}, Profile ID {profile_id}. Skipping.")
 
@@ -245,7 +258,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                 else:
                      logger.warning(f"Invalid clock usage entry found for key {uuid}. Skipping.")
 
-            logger.info(f"Clock usage data loaded successfully from {CLOCK_USAGE_FILE}. Loaded {len(cleaned_data)} UUIDs.")
+            logger.info(f"Clock usage data loaded successfully from {CLOCK_USAGE_FILE}. Loaded {len(cleaned_data)} UUIDs with entries.")
             return cleaned_data
         except Exception as e:
             logger.error(f"An unexpected error occurred loading {CLOCK_USAGE_FILE}: {e}", exc_info=True)
@@ -284,7 +297,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
             logger.error(f"Unexpected error saving {CLOCK_USAGE_FILE}: {e}", exc_info=True)
 
 
-    # --- Clock Usage Logic ---
+    # --- Clock Usage Logic (Keep in ForgeCog as it's used by the command and manager) ---
 
     def is_clock_used(self, uuid: str, profile_internal_id: str) -> bool:
         """Checks if the Enchanted Clock buff is active for a profile."""
@@ -344,7 +357,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                 continue
 
             profile_ids_to_delete = []
-            for profile_id, pdata in profiles.items():
+            for profile_id, pdata in list(profiles.items()):
                 is_invalid = (
                     not isinstance(pdata, dict) or
                     "end_timestamp" not in pdata or
@@ -372,7 +385,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
             if not profiles and uuid in self.clock_usage:
                 del self.clock_usage[uuid]
                 modified = True
-                logger.debug(f"Removed empty UUID entry in clock usage for {uuid}.")
+                logger.debug(f"Removed empty UUID entry in clock usage for {uuid}")
 
 
         if modified:
@@ -382,420 +395,26 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
             logger.debug("No clock usage data modified during cleanup.")
 
 
-    # --- Notification Logic ---
-
-    def load_notifications_status(self) -> dict:
-        """Loads forge notification status from NOTIFICATIONS_FILE."""
-        logger.debug(f"Loading notification status from {NOTIFICATIONS_FILE}...")
-        if not os.path.exists(NOTIFICATIONS_FILE):
-            logger.info(f"Notification status file not found: {NOTIFICATIONS_FILE}. Starting with empty status.")
-            return {}
-        try:
-            with open(NOTIFICATIONS_FILE, 'r', encoding='utf-8') as f:
-                 data = json.load(f)
-
-            if not isinstance(data, dict):
-                logger.warning(f"Invalid data format in {NOTIFICATIONS_FILE}. Expected dictionary. Starting fresh.")
-                return {}
-            logger.info(f"Notification status loaded successfully from {NOTIFICATIONS_FILE}. Loaded status for {len(data)} users.")
-            return data
-        except (json.JSONDecodeError, Exception) as e:
-            logger.error(f"Could not load {NOTIFICATIONS_FILE}: {e}. Assuming empty status.", exc_info=True)
-            return {}
-
-    def save_notifications_status(self):
-        """Saves forge notification status to NOTIFICATIONS_FILE."""
-        logger.debug(f"Saving notification status to {NOTIFICATIONS_FILE}...")
-        try:
-            save_dir = os.path.dirname(NOTIFICATIONS_FILE)
-            if save_dir and not os.path.exists(save_dir):
-                logger.debug(f"Directory {save_dir} does not exist. Creating...")
-                try:
-                    os.makedirs(save_dir, exist_ok=True)
-                    logger.debug(f"Directory {save_dir} created successfully.")
-                except OSError as e:
-                    logger.error(f"Could not create directory {save_dir} for notifications status: {e}", exc_info=True)
-                    return # Cannot save if directory creation fails
-
-            temp_file = NOTIFICATIONS_FILE + ".tmp"
-            with open(temp_file, 'w', encoding='utf-8') as f:
-                json.dump(self.notifications_status, f, indent=4)
-            os.replace(temp_file, NOTIFICATIONS_FILE)
-            logger.info(f"Successfully saved notification status to {NOTIFICATIONS_FILE}")
-        except Exception as e:
-            logger.error(f"Could not save {NOTIFICATIONS_FILE}: {e}", exc_info=True)
-
-    async def send_forge_webhook(self, notification_data: dict):
-        """Sends a combined notification to the configured webhook URL."""
-        logger.debug("Attempting to send forge webhook.")
-        if not self.webhook_url:
-            logger.warning("Webhook URL not configured. Skipping notification.")
-            return
-
-        message_content = notification_data.get("message", "A forge item is ready!")
-        discord_user_id = notification_data.get("discord_user_id")
-
-        if not message_content:
-             logger.warning(f"Webhook message content is empty for user {discord_user_id}. Skipping.")
-             return
-
-        webhook_payload = {
-            "content": message_content,
-            "allowed_mentions": {
-                "parse": ["users"],
-                 "replied_user": False
-            }
-        }
-
-        # Removed the redundant check for webhook_payload content/embeds as message_content is checked above
-
-
-        headers = {'Content-Type': 'application/json'}
-        logger.debug(f"Sending webhook for user {discord_user_id} with payload: {webhook_payload}")
-
-        try:
-            response = await asyncio.to_thread(
-                requests.post,
-                self.webhook_url,
-                json=webhook_payload,
-                headers=headers,
-                timeout=10
-            )
-
-            if 200 <= response.status_code < 300:
-                logger.info(f"Successfully sent combined webhook notification for user {discord_user_id}.")
-            else:
-                logger.error(f"Error sending combined webhook for user {discord_user_id}: {response.status_code} - {response.text}")
-
-        except requests.exceptions.Timeout:
-            logger.error(f"Timeout error sending combined webhook for user {discord_user_id}.")
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Request exception sending combined webhook for user {discord_user_id}: {e}", exc_info=True)
-        except Exception as e:
-            logger.error(f"Unexpected exception sending combined webhook for user {discord_user_id}: {e}", exc_info=True)
-
-    @tasks.loop(minutes=5)
-    async def check_forge_completions(self):
-        """Periodically checks for completed forge items and sends combined notifications."""
-        logger.debug("Forge completion check task started.")
-        if not self.hypixel_api_key or not self.webhook_url:
-            if not self.hypixel_api_key: logger.warning("Notification Task: Hypixel API key missing.")
-            if not self.webhook_url: logger.warning("Notification Task: Webhook URL missing.")
-            logger.debug("Notification check task skipped due to missing keys.")
-            return
-
-        await self.bot.wait_until_ready()
-        logger.debug("Bot is ready for notification task.")
-
-        current_time_ms = time.time() * 1000
-        self.registrations = self.load_registrations()
-        self.notifications_status = self.load_notifications_status()
-        logger.debug("Reloaded registrations and notification status for check.")
-
-        if not self.registrations:
-             logger.debug("No registrations found. Skipping notification check.")
-             return
-
-        notifications_status_changed = False
-
-        for discord_user_id_str, user_accounts in list(self.registrations.items()):
-            logger.debug(f"Checking forge completions for Discord user ID: {discord_user_id_str}")
-            if not user_accounts:
-                 logger.debug(f"No accounts registered for user {discord_user_id_str}. Skipping.")
-                 continue
-
-            try:
-                discord_user_id = int(discord_user_id_str)
-                mention_string = f"<@{discord_user_id}>"
-                logger.debug(f"User ID converted to int: {discord_user_id}, Mention string: {mention_string}")
-            except ValueError:
-                logger.error(f"Notification Task: Invalid Discord User ID in registrations: {discord_user_id_str}. Skipping user.")
-                continue
-
-            all_ready_items_for_user = []
-
-            for account in list(user_accounts):
-                mc_uuid = account.get('uuid')
-                logger.debug(f"Checking account with UUID: {mc_uuid} for user {discord_user_id_str}")
-                if not mc_uuid:
-                    logger.warning(f"Account missing UUID for user {discord_user_id_str}. Skipping account.")
-                    continue
-
-                uuid_dashed = format_uuid(mc_uuid)
-                profiles_data_full = get_player_profiles(self.hypixel_api_key, uuid_dashed)
-
-                if not profiles_data_full or not profiles_data_full.get("success", False):
-                    logger.error(f"Notification Task: Could not retrieve profiles for {mc_uuid} for user {discord_user_id_str}")
-                    continue
-
-                profiles = profiles_data_full.get("profiles", [])
-                if not profiles:
-                    logger.debug(f"No Skyblock profiles found for UUID {mc_uuid}.")
-                    continue
-
-                for profile in list(profiles):
-                    profile_cute_name = profile.get("cute_name", "Unknown Profile")
-                    profile_internal_id = profile.get("profile_id")
-                    logger.debug(f"Checking profile '{profile_cute_name}' ({profile_internal_id}) for UUID {mc_uuid}")
-
-                    if profile_internal_id is None:
-                         logger.warning(f"Skipping profile '{profile_cute_name}' with missing internal ID for UUID {mc_uuid}.")
-                         continue
-
-                    member_data = profile.get("members", {}).get(mc_uuid, {})
-                    forge_processes_data = member_data.get("forge", {}).get("forge_processes", {})
-
-                    forge_time_level = member_data.get("mining_core", {}).get("nodes", {}).get("forge_time")
-                    time_reduction_percent = calculate_quick_forge_reduction(forge_time_level)
-                    clock_is_active = self.is_clock_used(mc_uuid, profile_internal_id)
-                    logger.debug(f"Profile '{profile_cute_name}': Quick Forge Reduction: {time_reduction_percent}%, Clock Active: {clock_is_active}")
-
-
-                    # Ensure notification status structure exists for this user/uuid/profile
-                    if discord_user_id_str not in self.notifications_status:
-                        self.notifications_status[discord_user_id_str] = {}
-                        notifications_status_changed = True
-                        logger.debug(f"Created new notification status entry for user {discord_user_id_str}")
-
-                    if mc_uuid not in self.notifications_status[discord_user_id_str]:
-                        self.notifications_status[discord_user_id_str][mc_uuid] = {}
-                        notifications_status_changed = True
-                        logger.debug(f"Created new notification status entry for UUID {mc_uuid} under user {discord_user_id_str}")
-
-
-                    if profile_internal_id not in self.notifications_status[discord_user_id_str][mc_uuid]:
-                        self.notifications_status[discord_user_id_str][mc_uuid][profile_internal_id] = {
-                            "profile_name": profile_cute_name, "items": []}
-                        notifications_status_changed = True
-                        logger.debug(f"Created new notification status entry for profile {profile_internal_id} under UUID {mc_uuid}")
-
-                    profile_notif_data = self.notifications_status[discord_user_id_str][mc_uuid][profile_internal_id]
-                    if "items" not in profile_notif_data or not isinstance(profile_notif_data["items"], list):
-                         logger.warning(f"'items' key missing or not a list in notification status for profile {profile_internal_id}. Resetting.")
-                         profile_notif_data["items"] = []
-                         notifications_status_changed = True
-
-                    # Cleanup logic for items no longer in the API data
-                    current_items_in_api_forge_identifiers = set()
-                    for forge_type_key, slots_data in (forge_processes_data or {}).items():
-                         if isinstance(slots_data, dict):
-                            for slot_key, item_api_data in (slots_data or {}).items():
-                                if isinstance(item_api_data, dict) and item_api_data.get("startTime") is not None and item_api_data.get("id") is not None:
-                                     identifier = f"{forge_type_key}_{slot_key}_{item_api_data['id']}"
-                                     current_items_in_api_forge_identifiers.add(identifier)
-
-                    items_to_keep = []
-                    for tracked_item in list(profile_notif_data.get("items", [])):
-                         # Validate tracked item structure
-                         if isinstance(tracked_item, dict) and tracked_item.get("slot_identifier") and tracked_item.get("item_id"):
-                             # Construct identifier from tracked item
-                             tracked_identifier = f"{tracked_item.get('slot_type', 'unknown')}_{tracked_item.get('slot_number', 'unknown')}_{tracked_item.get('item_id', 'unknown')}"
-
-                             if tracked_identifier in current_items_in_api_forge_identifiers:
-                                items_to_keep.append(tracked_item)
-                                logger.debug(f"Keeping tracked item {tracked_identifier} for profile {profile_internal_id}")
-                             else:
-                                logger.info(f"Removing expired tracked item {tracked_identifier} for profile {profile_internal_id} (not in API data).")
-                                notifications_status_changed = True
-
-                         else:
-                             logger.warning(f"Removing invalid tracked item format: {tracked_item} for profile {profile_internal_id}")
-                             notifications_status_changed = True
-
-                    profile_notif_data["items"] = items_to_keep
-                    logger.debug(f"After cleanup, {len(profile_notif_data['items'])} tracked items remain for profile {profile_internal_id}.")
-
-
-                    # Check for newly completed items
-                    for forge_type_key, slots_data in (forge_processes_data or {}).items():
-                        if isinstance(slots_data, dict):
-                            for slot_key, item_api_data in (slots_data or {}).items():
-                                if isinstance(item_api_data, dict) and item_api_data.get("startTime") is not None and item_api_data.get("id") is not None:
-                                    item_id_api = item_api_data.get("id")
-                                    start_time_ms_api = item_api_data.get("startTime")
-
-                                    forge_item_details = self.forge_items_data.get(item_id_api)
-
-                                    if not isinstance(forge_item_details, dict) or forge_item_details.get("duration") is None or not isinstance(forge_item_details.get("duration"), (int, float)):
-                                        if item_id_api != "Unknown Item":
-                                            logger.warning(f"Notification Task: Skipping item {item_id_api} in {profile_cute_name} due to missing duration in forge_items.json.")
-                                        continue
-
-                                    item_name_display = forge_item_details.get("name", item_id_api)
-                                    base_duration_ms = forge_item_details["duration"]
-
-                                    effective_duration_ms = base_duration_ms * (1 - time_reduction_percent / 100)
-                                    # Note: The clock reduction is applied when calculating *remaining* time for display.
-                                    # For notification trigger, we need the effective end time *without* the clock,
-                                    # because the clock makes it ready sooner. The *actual* completion time considering
-                                    # the clock is what matters for triggering.
-                                    # Let's recalculate end time considering the clock for accurate trigger logic.
-
-                                    # Calculate end time with Quick Forge
-                                    end_time_with_quick_forge = start_time_ms_api + effective_duration_ms
-
-                                    # Calculate end time with Quick Forge AND Enchanted Clock
-                                    end_time_with_clock = start_time_ms_api + max(0, effective_duration_ms - ENCHANTED_CLOCK_REDUCTION_MS)
-
-                                    # The item is ready when the current time is >= the end time *after* applying both buffs.
-                                    adjusted_end_time_ms = end_time_with_clock if clock_is_active else end_time_with_quick_forge
-                                    logger.debug(f"Item {item_name_display} in {profile_cute_name}: Start: {start_time_ms_api}, Base Duration: {base_duration_ms}, Effective Duration (Quick Forge): {effective_duration_ms}, Adjusted End Time (with buffs): {adjusted_end_time_ms}, Current Time: {current_time_ms}")
-
-
-                                    slot_identifier = f"{forge_type_key}_{slot_key}"
-
-                                    already_notified = any(
-                                        isinstance(entry, dict) and
-                                        entry.get("slot_identifier") == slot_identifier and
-                                        entry.get("item_id") == item_id_api and
-                                        entry.get("notified", False)
-                                        for entry in profile_notif_data.get("items", [])
-                                    )
-                                    logger.debug(f"Item {item_name_display} ({slot_identifier}) already notified: {already_notified}")
-
-
-                                    if current_time_ms >= adjusted_end_time_ms and not already_notified:
-                                        logger.info(
-                                            f"Item '{item_name_display}' in profile '{profile_cute_name}' ({mc_uuid}) ready for user {discord_user_id_str}. Adding to combined list.")
-
-                                        all_ready_items_for_user.append({
-                                            "profile_name": profile_cute_name,
-                                            "item_name": item_name_display,
-                                            "slot_type": forge_type_key,
-                                            "slot_number": slot_key,
-                                            "start_time_ms": start_time_ms_api,
-                                            "adjusted_end_time_ms": adjusted_end_time_ms,
-                                            "slot_identifier": slot_identifier,
-                                            "item_id": item_id_api
-                                        })
-
-                                        # Update the notification status to mark as notified
-                                        found_entry_in_status = next(
-                                            (entry for entry in profile_notif_data.get("items", [])
-                                             if isinstance(entry, dict) and entry.get("slot_identifier") == slot_identifier and entry.get("item_id") == item_id_api),
-                                            None
-                                        )
-
-                                        if found_entry_in_status:
-                                             found_entry_in_status["notified"] = True
-                                             found_entry_in_status["notification_timestamp"] = current_time_ms
-                                             logger.debug(f"Updated notification status for existing item {slot_identifier}_{item_id_api}")
-                                        else:
-                                             # This case should ideally be caught by the cleanup and re-tracking,
-                                             # but adding defensive code here.
-                                             profile_notif_data["items"].append({
-                                                "slot_identifier": slot_identifier,
-                                                "slot_type": forge_type_key,
-                                                "slot_number": int(slot_key) if str(slot_key).isdigit() else slot_key,
-                                                "item_id": item_id_api,
-                                                "notification_timestamp": current_time_ms,
-                                                "notified": True
-                                            })
-                                             logger.debug(f"Added new entry to notification status for item {slot_identifier}_{item_id_api}")
-
-                                        notifications_status_changed = True
-
-
-            if all_ready_items_for_user:
-                logger.info(f"User {discord_user_id_str}: {len(all_ready_items_for_user)} items ready. Preparing combined notification.")
-
-                all_ready_items_for_user.sort(key=lambda x: (x['profile_name'], int(x['slot_number']) if str(x['slot_number']).isdigit() else str(x['slot_number'])))
-
-                message_lines = [f"{mention_string}\n"]
-                message_lines.append("Your forge items are ready:")
-
-                for item_info in all_ready_items_for_user:
-                    ready_timestamp_unix = int(item_info["adjusted_end_time_ms"] / 1000)
-                    started_timestamp_unix = int(item_info["start_time_ms"] / 1000)
-
-                    ready_since_discord_format = f"<t:{ready_timestamp_unix}:R>"
-                    started_ago_discord_format = f"<t:{started_timestamp_unix}:R>"
-
-                    message_lines.append(
-                        f"- Your **{item_info['item_name']}** on {item_info['profile_name']} was ready {ready_since_discord_format} (started {started_ago_discord_format})"
-                    )
-
-                combined_message = "\n".join(message_lines)
-                logger.debug(f"Combined notification message for user {discord_user_id_str}:\n{combined_message}")
-
-
-                combined_notification_data = {
-                    "message": combined_message,
-                    "discord_user_id": discord_user_id_str,
-                }
-
-                await self.send_forge_webhook(combined_notification_data)
-                logger.info(f"Combined webhook sent for user {discord_user_id_str}.")
-
-
-        # Cleanup empty profile/uuid entries in notifications_status
-        uuids_to_delete_notif = []
-        for uuid, profiles in list(self.notifications_status.get(discord_user_id_str, {}).items()):
-             if isinstance(profiles, dict):
-                profile_ids_to_delete_notif = []
-                for profile_id, pdata in list(profiles.items()):
-                     if not isinstance(pdata, dict) or not pdata.get("items"):
-                          profile_ids_to_delete_notif.append(profile_id)
-                          logger.debug(f"Removing empty/invalid profile {profile_id} from notification status for UUID {uuid}.")
-                for profile_id in profile_ids_to_delete_notif:
-                     del profiles[profile_id]
-                     notifications_status_changed = True
-             if not profiles:
-                  uuids_to_delete_notif.append(uuid)
-                  logger.debug(f"Removing empty UUID {uuid} from notification status for user {discord_user_id_str}.")
-
-        for uuid in uuids_to_delete_notif:
-             del self.notifications_status[discord_user_id_str][uuid]
-             notifications_status_changed = True
-
-        # Cleanup empty user entries in notifications_status
-        if discord_user_id_str in self.notifications_status and not self.notifications_status[discord_user_id_str]:
-             del self.notifications_status[discord_user_id_str]
-             notifications_status_changed = True
-             logger.debug(f"Removing empty user {discord_user_id_str} from notification status.")
-
-
-        if notifications_status_changed:
-             logger.debug('Notification status changed. Saving...')
-             self.save_notifications_status()
-        else:
-             logger.debug('Notification status did not change. No save needed.')
-
-        logger.debug("Forge completion check task finished.")
-
-
-    @check_forge_completions.before_loop
-    async def before_check_forge_completions(self):
-        """Ensures the bot is ready before starting the loop."""
-        logger.debug("Waiting for bot to be ready before starting forge completion check loop.")
-        await self.bot.wait_until_ready()
-        logger.debug("Bot is ready. Starting forge completion check loop.")
-
-
     # --- Discord Event Listeners ---
 
     @commands.Cog.listener()
     async def on_ready(self):
         """Event handler for when the cog is loaded and bot is ready."""
         logger.info(f"{self.__class__.__name__} Cog loaded and ready.")
-        self.registrations = self.load_registrations()
+        # Reload data on ready
+        self.registrations = self.load_registrations() # Reload for command consistency
         self.clock_usage = self.load_clock_usage()
-        self.cleanup_expired_clock_entries()
-        self.notifications_status = self.load_notifications_status()
+        self.cleanup_expired_clock_entries() # Keep clock cleanup here
 
-        logger.info("Initial data loaded and expired clock entries cleaned up on ready.")
-
-
-        if not self.webhook_url:
+        # The notification manager handles its own loading and task starting now.
+        if not self.notification_manager.webhook_url:
             logger.warning("WEBHOOK_URL not set. Forge completion notifications will be disabled.")
+        else:
+             logger.info("Webhook URL found. Forge completion notifications are enabled.")
 
-        # Run the check once immediately on startup
-        logger.debug("Running initial forge completion check on ready.")
-        await self.check_forge_completions()
 
-        # Start the periodic task loop
-        logger.info("Starting periodic forge completion check task.")
-        self.check_forge_completions.start()
+        # Start the notification manager's periodic task loop
+        self.notification_manager.start_notifications_task()
 
 
     # --- Discord Commands ---
@@ -817,6 +436,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
 
         await interaction.response.defer()
         logger.debug("Deferred interaction for forge command.")
+        # Cleanup clock entries before potentially checking forge status
         self.cleanup_expired_clock_entries()
         logger.debug("Cleaned up expired clock entries before processing forge command.")
 
@@ -825,6 +445,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
         if username is None and profile_name is None:
             logger.debug("Processing forge command for registered accounts with pagination.")
             discord_user_id = str(interaction.user.id)
+            # Reload registrations here to get the latest for the command
             self.registrations = self.load_registrations()
             user_accounts = self.registrations.get(discord_user_id)
 
@@ -892,15 +513,16 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
 
                     if has_any_active_items:
                         forge_time_level = member_data.get("mining_core", {}).get("nodes", {}).get("forge_time")
+                        # Use the helper function from this file
                         time_reduction_percent = calculate_quick_forge_reduction(forge_time_level)
                         perk_message = f" (Quick Forge: -{time_reduction_percent:.1f}%)" if time_reduction_percent > 0 else ""
                         logger.debug(f"Profile {profile_internal_id}: Forge Time Level: {forge_time_level}, Reduction: {time_reduction_percent}%")
 
-
+                        # Use the clock usage method from self (ForgeCog)
                         clock_is_actively_buffing = self.is_clock_used(current_uuid, profile_internal_id)
                         logger.debug(f"Profile {profile_internal_id}: Clock is actively buffing: {clock_is_actively_buffing}")
 
-
+                        # Use the helper function from this file
                         formatted_items_list = format_active_forge_items(
                             forge_processes_data, self.forge_items_data,
                             time_reduction_percent, clock_is_actively_buffing
@@ -916,6 +538,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                             "perk_message": perk_message,
                             "items_raw": forge_processes_data,
                             "time_reduction_percent": time_reduction_percent,
+                            # formatted_items is generated here for the initial embed
                             "formatted_items": "\n".join(formatted_items_list)
                         })
                         logger.debug(f"Added profile {profile_internal_id} to active forge profiles list.")
@@ -923,6 +546,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
 
             if active_forge_profiles_data:
                 logger.info(f"Found {len(active_forge_profiles_data)} profiles with active forge items for user {discord_user_id}.")
+                # Pass self to the view so it can access clock usage methods
                 view = ForgePaginationView(active_forge_profiles_data, interaction, self.forge_items_data, self)
                 await interaction.edit_original_response(content="", embed=view.embeds[0], view=view)
                 logger.debug("Sent paginated response for registered accounts.")
@@ -951,6 +575,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
         else:
             logger.debug("No username provided, defaulting to first registered account.")
             discord_user_id = str(interaction.user.id)
+            # Reload registrations here for the command
             self.registrations = self.load_registrations()
             user_accounts = self.registrations.get(discord_user_id)
 
@@ -968,8 +593,8 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
 
             # Attempt to get the username using the UUID from the first registered account
             logger.debug(f"Getting username for registered account UUID: {target_uuid}")
-            # Assuming get_uuid can do reverse lookup or you have a separate one
-            target_username_display = await asyncio.to_thread(get_uuid, target_uuid, reverse=True)
+            target_username_display = uuid_to_username(target_uuid) # Use the function from skyblock
+
             # If username lookup fails, fallback to a temporary display
             if not target_username_display:
                  logger.warning(f"Could not get username for UUID {target_uuid} using uuid_to_username. Using UUID display.")
@@ -1040,12 +665,13 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
 
         member_data = target_profile.get("members", {}).get(target_uuid, {})
         forge_time_level = member_data.get("mining_core", {}).get("nodes", {}).get("forge_time")
+        # Use the helper function from this file
         time_reduction_percent = calculate_quick_forge_reduction(forge_time_level)
         perk_message = f" (Quick Forge: -{time_reduction_percent:.1f}%)" if time_reduction_percent > 0 else ""
         forge_processes_data = member_data.get("forge", {}).get("forge_processes", {})
         logger.debug(f"Single profile '{profile_cute_name}': Forge Time Level: {forge_time_level}, Reduction: {time_reduction_percent}%")
 
-
+        # Use the clock usage method from self (ForgeCog)
         clock_is_actively_buffing_single = False
         if profile_internal_id:
             clock_is_actively_buffing_single = self.is_clock_used(target_uuid, profile_internal_id)
@@ -1069,6 +695,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                 f"No active items found in Forge on profile '{profile_cute_name}' of '{target_username_display}'{perk_message}.", ephemeral=True)
             return
 
+        # Use the helper function from this file
         formatted_items_list_single = format_active_forge_items(
             forge_processes_data, self.forge_items_data,
             time_reduction_percent, clock_is_actively_buffing_single
@@ -1103,7 +730,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
             single_profile_data,
             interaction,
             self.forge_items_data,
-            self,
+            self, # Pass self (ForgeCog instance) to the view for clock usage
             "\n".join(formatted_items_list_single)
         )
         logger.debug("Created SingleForgeView.")
