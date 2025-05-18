@@ -129,7 +129,7 @@ def format_active_forge_items(forge_processes_data: dict, forge_items_config: di
 
             # Append the formatted string with the End time timestamp
             forge_items_output.append(
-                f"Slot {slot} ({forge_type_key.replace('_', ' ').title()}): {item_name} - Ends: {end_time_display}")
+                f"Slot {slot} ({forge_type_key.replace('_', ' ').title()}): {item_name} - Ends at: {end_time_display}")
             logger.debug(f"Added formatted item with end time: {forge_items_output[-1]}")
 
     logger.debug(f"Exiting format_active_forge_items. Returning {len(forge_items_output)} items.")
