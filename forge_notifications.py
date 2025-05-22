@@ -375,6 +375,20 @@ class ForgeNotificationManager:
                                     item_name_display = forge_item_details.get("name", item_id_api)
                                     base_duration_ms = forge_item_details["duration"]
 
+                                    # Cole Check for reduced time
+                                    url = "https://api.hypixel.net/v2/resources/skyblock/election"
+                                    try:
+                                        response = requests.get(url)
+                                        mayor_data = response.json()
+                                    except Exception as e:
+                                        logger.error(f'Error retrieving Skyblock Mayor data {e}')
+
+                                    if mayor_data and mayor_data.get("success") and mayor_data.get("mayor", {}).get(
+                                            "name") == "Cole":
+                                        for perk in mayor_data.get("mayor", {}).get("perks", []):
+                                            if perk.get("name") == "Molten Forge":
+                                                base_duration_ms = base_duration_ms * 0.75
+
                                     effective_duration_ms = base_duration_ms * (1 - time_reduction_percent / 100)
 
                                     # Calculate end time with Quick Forge AND Enchanted Clock
