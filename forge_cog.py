@@ -1,4 +1,5 @@
 # forge_cog.py
+from http.client import responses
 
 import discord
 from discord import app_commands
@@ -88,6 +89,21 @@ def format_active_forge_items(forge_processes_data: dict, forge_items_config: di
             if forge_item_info and start_time_ms is not None:
                 item_name = forge_item_info.get("name", item_id)
                 base_duration_ms = forge_item_info.get("duration")
+
+                #Cole Check for reduced time
+                url = "https://api.hypixel.net/v2/resources/skyblock/election"
+                try:
+                    response = requests.get(url)
+                    mayor_data = response.json()
+                except Exception as e:
+                    logger.error(f'Error retrieving Skyblock Mayor data {e}')
+
+                if mayor_data and mayor_data.get("success") and mayor_data.get("mayor", {}).get("name") == "Cole":
+                    for perk in mayor_data.get("mayor", {}).get("perks", []):
+                        if perk.get("name") == "Molten Forge":
+                            base_duration_ms = base_duration_ms * 0.75
+                            logger.info('Applied Coles Molten Forge Perk')
+
                 logger.debug(f"Found forge item info for {item_id}. Name: {item_name}, Base Duration: {base_duration_ms}")
 
                 if base_duration_ms is not None and isinstance(base_duration_ms, (int, float)):
