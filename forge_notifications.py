@@ -18,7 +18,7 @@ import math # Import math for ceil
 
 # --- Constants for History ---
 HISTORY_FILE = "./notification_history.json"
-HISTORY_CLEANUP_DAYS = 7 # Clean up history entries older than 7 days
+HISTORY_CLEANUP_DAYS = 365 # Clean up history entries older than 7 days
 
 # --- Helper Functions (Used internally by the notification manager) ---
 
