@@ -227,10 +227,21 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                  logger.warning(f"Invalid data format in {REGISTRATION_FILE}. Expected dictionary for command. Starting fresh.")
                  return {}
 
-            for user_id, accounts in data.items():
-                if isinstance(user_id, str) and isinstance(accounts, list):
-                     # Add debug log for each user loaded
-                    logger.debug(f"Loaded user {user_id} from {REGISTRATION_FILE} for command.")
+            for user_id, user_data in data.items():
+                if isinstance(user_id, str):
+                    # Handle migration from old format (list of accounts) to new format (dict with accounts and preferences)
+                    if isinstance(user_data, list):
+                        # Old format: user_data is a list of accounts
+                        accounts = user_data
+                        logger.debug(f"Loaded user {user_id} from {REGISTRATION_FILE} for command (old format).")
+                    elif isinstance(user_data, dict) and "accounts" in user_data:
+                        # New format: user_data is a dict with accounts and notification_preference
+                        accounts = user_data.get("accounts", [])
+                        logger.debug(f"Loaded user {user_id} from {REGISTRATION_FILE} for command (new format).")
+                    else:
+                        logger.warning(f"Invalid user data format for user {user_id} (command): {user_data}. Skipping.")
+                        continue
+
                     cleaned_accounts = []
                     for account in accounts:
                         if isinstance(account, dict) and account.get('uuid') is not None:
@@ -242,7 +253,7 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                     if cleaned_accounts:
                         cleaned_data[user_id] = cleaned_accounts
                 else:
-                     logger.warning(f"Invalid registration format for user {user_id} (command): {accounts}. Skipping.")
+                     logger.warning(f"Invalid user ID format: {user_id} (command). Skipping.")
 
             logger.info(f"Registrations loaded successfully from {REGISTRATION_FILE} for command. Loaded {len(cleaned_data)} users.")
             return cleaned_data
