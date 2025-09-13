@@ -92,10 +92,23 @@ class ForgeNotificationManager:
                  logger.warning(f"Invalid data format in {REGISTRATION_FILE}. Expected dictionary for notifications. Starting fresh.")
                  return {}
 
-            for user_id, accounts in data.items():
-                if isinstance(user_id, str) and isinstance(accounts, list):
+            for user_id, user_data in data.items():
+                if isinstance(user_id, str):
+                    # Handle migration from old format (list of accounts) to new format (dict with accounts and preferences)
+                    if isinstance(user_data, list):
+                        # Old format: user_data is a list of accounts
+                        accounts = user_data
+                        notification_preference = "webhook"  # Default for migrated users
+                    elif isinstance(user_data, dict) and "accounts" in user_data:
+                        # New format: user_data is a dict with accounts and notification_preference
+                        accounts = user_data.get("accounts", [])
+                        notification_preference = user_data.get("notification_preference", "webhook")
+                    else:
+                        logger.warning(f"Invalid user data format for user {user_id} (notification task): {user_data}. Skipping.")
+                        continue
+
                     # Add debug log for each user loaded for the task
-                    logger.debug(f"Loaded user {user_id} from {REGISTRATION_FILE} for notification task.")
+                    logger.debug(f"Loaded user {user_id} from {REGISTRATION_FILE} for notification task (preference: {notification_preference}).")
                     cleaned_accounts = []
                     for account in accounts:
                         if isinstance(account, dict) and account.get('uuid') is not None:
@@ -105,9 +118,12 @@ class ForgeNotificationManager:
                         else:
                             logger.warning(f"Invalid account entry found for user {user_id} in registrations (notification task): {account}. Skipping.")
                     if cleaned_accounts:
-                        cleaned_data[user_id] = cleaned_accounts
+                        cleaned_data[user_id] = {
+                            "accounts": cleaned_accounts,
+                            "notification_preference": notification_preference
+                        }
                 else:
-                     logger.warning(f"Invalid registration format for user {user_id} (notification task): {accounts}. Skipping.")
+                     logger.warning(f"Invalid user ID format: {user_id} (notification task). Skipping.")
 
             logger.info(f"Registrations loaded successfully from {REGISTRATION_FILE} for notification task. Loaded {len(cleaned_data)} users.")
             return cleaned_data
@@ -236,6 +252,64 @@ class ForgeNotificationManager:
         except Exception as e:
             logger.error(f"Unexpected exception sending combined webhook for user {discord_user_id}: {e}", exc_info=True)
 
+    async def send_forge_dm(self, notification_data: dict):
+        """Sends a DM notification to the user."""
+        logger.debug("Attempting to send forge DM.")
+        
+        message_content = notification_data.get("message", "A forge item is ready!")
+        discord_user_id = notification_data.get("discord_user_id")
+        ready_items_sent = notification_data.get("ready_items_sent", [])
+
+        if not message_content:
+            logger.warning(f"DM message content is empty for user {discord_user_id}. Skipping.")
+            return
+
+        try:
+            # Get the user object - try cache first, then fetch if needed
+            user = self.bot.get_user(int(discord_user_id))
+            if not user:
+                # Try to fetch the user if not in cache
+                try:
+                    user = await self.bot.fetch_user(int(discord_user_id))
+                    logger.debug(f"Successfully fetched user {discord_user_id} from Discord API.")
+                except discord.NotFound:
+                    logger.error(f"Discord user {discord_user_id} not found. User may not exist or bot doesn't share servers with them.")
+                    return
+                except discord.HTTPException as e:
+                    logger.error(f"HTTP error fetching user {discord_user_id}: {e}")
+                    return
+                except Exception as e:
+                    logger.error(f"Unexpected error fetching user {discord_user_id}: {e}")
+                    return
+            
+            if not user:
+                logger.error(f"Could not find Discord user {discord_user_id} for DM notification.")
+                return
+
+            # Send the DM
+            await user.send(message_content)
+            logger.info(f"Successfully sent DM notification to user {discord_user_id}.")
+            
+            # Add successfully notified items to history
+            for item_info in ready_items_sent:
+                item_identifier = (
+                    notification_data["discord_user_id_str"],
+                    item_info["profile_internal_id"],
+                    item_info["start_time_ms"],
+                    item_info["adjusted_end_time_ms"]
+                )
+                self.notified_items_history.add(item_identifier)
+            if ready_items_sent:
+                self.save_history()
+                logger.debug(f"Added {len(ready_items_sent)} items to history for user {discord_user_id}.")
+
+        except discord.Forbidden:
+            logger.error(f"Cannot send DM to user {discord_user_id}. User may have DMs disabled.")
+        except discord.HTTPException as e:
+            logger.error(f"Discord HTTP error sending DM to user {discord_user_id}: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected exception sending DM to user {discord_user_id}: {e}", exc_info=True)
+
 
     @tasks.loop(minutes=FORGE_CHECK_INTERVAL_MINUTES) # Define FORGE_CHECK_INTERVAL_MINUTES in constants.py
     async def check_forge_completions(self):
@@ -245,10 +319,9 @@ class ForgeNotificationManager:
         logger.debug(f"Forge completion check task started. Configured interval: {FORGE_CHECK_INTERVAL_MINUTES} minutes.")
 
 
-        if not self.hypixel_api_key or not self.webhook_url:
-            if not self.hypixel_api_key: logger.warning("Notification Task: Hypixel API key missing. Skipping check.")
-            if not self.webhook_url: logger.warning("Notification Task: Webhook URL missing. Skipping check.")
-            logger.debug("Notification check task skipped due to missing keys.")
+        if not self.hypixel_api_key:
+            logger.warning("Notification Task: Hypixel API key missing. Skipping check.")
+            logger.debug("Notification check task skipped due to missing API key.")
             # Print next check time even if skipped
             print(f"--- Next Forge Notification Check in {FORGE_CHECK_INTERVAL_MINUTES} minutes ---")
             return
@@ -285,8 +358,13 @@ class ForgeNotificationManager:
         user_active_forge_items = defaultdict(list)
 
 
-        for discord_user_id_str, user_accounts in list(self.registrations.items()):
+        for discord_user_id_str, user_data in list(self.registrations.items()):
             logger.debug(f"Processing accounts for Discord user ID: {discord_user_id_str}")
+            
+            # Extract accounts and notification preference
+            user_accounts = user_data.get("accounts", [])
+            notification_preference = user_data.get("notification_preference", "webhook")
+            
             if not user_accounts:
                  logger.debug(f"No accounts registered for user {discord_user_id_str}. Skipping.")
                  continue
@@ -436,9 +514,10 @@ class ForgeNotificationManager:
                 items_ready_now_for_notification[discord_user_id_str] = {
                     "ready_items": user_ready_items_now,
                     "mention_string": mention_string,
-                    "discord_user_id_str": discord_user_id_str
+                    "discord_user_id_str": discord_user_id_str,
+                    "notification_preference": notification_preference
                 }
-                logger.debug(f"Found {len(user_ready_items_now)} items ready now for user {discord_user_id_str}. Will send notification.")
+                logger.debug(f"Found {len(user_ready_items_now)} items ready now for user {discord_user_id_str}. Will send notification via {notification_preference}.")
 
 
         # --- Print Next Potential Forge Notifications to Console (Compacted) ---
@@ -483,12 +562,19 @@ class ForgeNotificationManager:
             for discord_user_id_str, notification_data in items_ready_now_for_notification.items():
                 ready_items = notification_data["ready_items"]
                 mention_string = notification_data["mention_string"]
+                notification_preference = notification_data["notification_preference"]
 
                 if ready_items:
                      ready_items.sort(key=lambda x: (x['profile_name'], int(x['slot_number']) if str(x['slot_number']).isdigit() else str(x['slot_number'])))
 
-                     message_lines = [f"{mention_string}\n"]
-                     message_lines.append("Your forge items are ready:")
+                     # Create message content based on notification preference
+                     if notification_preference == "dm":
+                         # For DMs, don't include mention since it's a direct message
+                         message_lines = ["Your forge items are ready:"]
+                     else:
+                         # For webhooks, include mention
+                         message_lines = [f"{mention_string}\n"]
+                         message_lines.append("Your forge items are ready:")
 
                      for item_info in ready_items:
                          ready_timestamp_unix = int(item_info["adjusted_end_time_ms"] / 1000)
@@ -506,7 +592,7 @@ class ForgeNotificationManager:
                      combined_message = "\n".join(message_lines)
                      logger.debug(f"Combined notification message for user {discord_user_id_str}:\n{combined_message}")
 
-                     # Pass ready_items to send_forge_webhook for history update
+                     # Pass ready_items to notification method for history update
                      combined_notification_data = {
                          "message": combined_message,
                          "discord_user_id": discord_user_id_str,
@@ -514,8 +600,12 @@ class ForgeNotificationManager:
                          "ready_items_sent": ready_items # Pass the list of items being sent
                      }
 
-                     await self.send_forge_webhook(combined_notification_data)
-                     # History update and save now happen inside send_forge_webhook upon success
+                     # Send notification based on user preference
+                     if notification_preference == "dm":
+                         await self.send_forge_dm(combined_notification_data)
+                     else:
+                         await self.send_forge_webhook(combined_notification_data)
+                     # History update and save now happen inside the respective notification method upon success
                 else:
                      logger.debug(f"No ready items found for user {discord_user_id_str} after filtering (might be due to history). Skipping notification.")
 

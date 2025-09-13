@@ -87,9 +87,20 @@ class RegistrationCog(commands.Cog, name="Registration Functions"):
         # 3. Update registration data
         # Ensure the user's entry exists
         if discord_user_id not in self.registrations:
-            self.registrations[discord_user_id] = []
+            self.registrations[discord_user_id] = {
+                "accounts": [],
+                "notification_preference": "webhook"  # Default to webhook
+            }
 
-        user_registrations = self.registrations[discord_user_id]
+        # Handle migration from old format (list of accounts) to new format (dict with accounts and preferences)
+        if isinstance(self.registrations[discord_user_id], list):
+            old_accounts = self.registrations[discord_user_id]
+            self.registrations[discord_user_id] = {
+                "accounts": old_accounts,
+                "notification_preference": "webhook"
+            }
+
+        user_registrations = self.registrations[discord_user_id]["accounts"]
 
         # Check if the UUID is already registered for this user
         existing_account = next((acc for acc in user_registrations if acc['uuid'] == uuid), None)
@@ -140,11 +151,24 @@ class RegistrationCog(commands.Cog, name="Registration Functions"):
 
         discord_user_id = str(interaction.user.id)
 
-        if discord_user_id not in self.registrations or not self.registrations[discord_user_id]:
+        if discord_user_id not in self.registrations:
             await interaction.followup.send("You have no registered Minecraft accounts.")
             return
 
-        user_registrations = self.registrations[discord_user_id]
+        # Handle migration from old format
+        if isinstance(self.registrations[discord_user_id], list):
+            old_accounts = self.registrations[discord_user_id]
+            self.registrations[discord_user_id] = {
+                "accounts": old_accounts,
+                "notification_preference": "webhook"
+            }
+
+        user_data = self.registrations[discord_user_id]
+        user_registrations = user_data.get("accounts", [])
+        
+        if not user_registrations:
+            await interaction.followup.send("You have no registered Minecraft accounts.")
+            return
 
         if minecraft_username is None:
             if profile_name is not None:
@@ -152,7 +176,10 @@ class RegistrationCog(commands.Cog, name="Registration Functions"):
                  return
 
             # Clear all registrations for this user
-            self.registrations[discord_user_id] = []
+            self.registrations[discord_user_id] = {
+                "accounts": [],
+                "notification_preference": user_data.get("notification_preference", "webhook")
+            }
             self.save_registrations()
             await interaction.followup.send("Successfully unregistered all your Minecraft accounts.")
             return
@@ -180,7 +207,7 @@ class RegistrationCog(commands.Cog, name="Registration Functions"):
                 message = f"Profile '{profile_name}' was not registered for Minecraft account '{minecraft_username}'."
         else:
             # Unregister the entire Minecraft account
-            self.registrations[discord_user_id].remove(account_to_modify)
+            user_data["accounts"].remove(account_to_modify)
             message = f"Successfully unregistered Minecraft account '{minecraft_username}'."
 
         # Save changes
@@ -196,13 +223,28 @@ class RegistrationCog(commands.Cog, name="Registration Functions"):
 
         discord_user_id = str(interaction.user.id)
 
-        if discord_user_id not in self.registrations or not self.registrations[discord_user_id]:
+        if discord_user_id not in self.registrations:
             await interaction.followup.send("You have no registered Minecraft accounts.")
             return
 
-        user_registrations = self.registrations[discord_user_id]
+        # Handle migration from old format
+        if isinstance(self.registrations[discord_user_id], list):
+            old_accounts = self.registrations[discord_user_id]
+            self.registrations[discord_user_id] = {
+                "accounts": old_accounts,
+                "notification_preference": "webhook"
+            }
 
-        response_message = "Your Registered Minecraft Accounts and Profiles:\n"
+        user_data = self.registrations[discord_user_id]
+        user_registrations = user_data.get("accounts", [])
+        
+        if not user_registrations:
+            await interaction.followup.send("You have no registered Minecraft accounts.")
+            return
+
+        notification_preference = user_data.get("notification_preference", "webhook")
+        response_message = f"Your Registered Minecraft Accounts and Profiles:\n"
+        response_message += f"**Notification Method:** {notification_preference.title()}\n\n"
 
         if not user_registrations:
              response_message += "  (None)\n"
@@ -235,6 +277,87 @@ class RegistrationCog(commands.Cog, name="Registration Functions"):
                     response_message += "  Registered Profiles: None (Using last played profile)\n"
 
         await interaction.followup.send(response_message)
+
+
+    @app_commands.command(name="setnotification", description="Sets your notification preference (webhook or dm).")
+    @app_commands.describe(preference="Choose between 'webhook' or 'dm' for notifications.")
+    async def setnotification_command(self, interaction: discord.Interaction, preference: str):
+        """Sets the user's notification preference."""
+        await interaction.response.defer(ephemeral=True)
+
+        discord_user_id = str(interaction.user.id)
+        preference = preference.lower().strip()
+
+        if preference not in ["webhook", "dm"]:
+            await interaction.followup.send("Invalid preference. Please choose either 'webhook' or 'dm'.")
+            return
+
+        if discord_user_id not in self.registrations:
+            await interaction.followup.send("You must register a Minecraft account first before setting notification preferences.")
+            return
+
+        # Handle migration from old format
+        if isinstance(self.registrations[discord_user_id], list):
+            old_accounts = self.registrations[discord_user_id]
+            self.registrations[discord_user_id] = {
+                "accounts": old_accounts,
+                "notification_preference": preference
+            }
+        else:
+            self.registrations[discord_user_id]["notification_preference"] = preference
+
+        self.save_registrations()
+        
+        await interaction.followup.send(f"Successfully set your notification preference to **{preference.title()}**.")
+
+    @app_commands.command(name="testdm", description="Sends a test DM notification to verify DM functionality.")
+    async def testdm_command(self, interaction: discord.Interaction):
+        """Sends a test DM notification to the user."""
+        await interaction.response.defer(ephemeral=True)
+
+        discord_user_id = str(interaction.user.id)
+        
+        # Create test notification data
+        test_notification_data = {
+            "message": "🧪 **TEST NOTIFICATION** 🧪\n\nYour forge items are ready:\n- Your **Test Item** on Test Profile was ready <t:1234567890:R> (started <t:1234567800:R>)",
+            "discord_user_id": discord_user_id,
+            "discord_user_id_str": discord_user_id,
+            "ready_items_sent": [{
+                "profile_internal_id": "test_profile_123",
+                "start_time_ms": 1234567800000,
+                "adjusted_end_time_ms": 1234567890000
+            }]
+        }
+
+        try:
+            # Import the notification manager from forge_notifications
+            from forge_notifications import ForgeNotificationManager
+            
+            # Create a temporary notification manager instance for testing
+            # We'll use None for parameters we don't need for this test
+            temp_manager = ForgeNotificationManager(
+                bot=self.bot,
+                hypixel_api_key=None,  # Not needed for DM test
+                webhook_url=None,      # Not needed for DM test
+                forge_items_data={},   # Not needed for DM test
+                forge_cog_ref=None    # Not needed for DM test
+            )
+            
+            # Send the test DM
+            await temp_manager.send_forge_dm(test_notification_data)
+            
+            await interaction.followup.send("✅ Test DM sent! Check your DMs to see if you received the notification.")
+            
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error sending test DM: {str(e)}")
+
+    @app_commands.command(name="myid", description="Shows your Discord user ID for testing purposes.")
+    async def myid_command(self, interaction: discord.Interaction):
+        """Shows the user's Discord ID."""
+        await interaction.response.defer(ephemeral=True)
+        
+        user_id = str(interaction.user.id)
+        await interaction.followup.send(f"Your Discord User ID is: `{user_id}`\n\nYou can use this ID in the test script by editing `test_dm.py` and replacing the hardcoded ID.")
 
 
 async def setup(bot: commands.Bot):

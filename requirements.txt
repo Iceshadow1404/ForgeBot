@@ -1,4 +1,21 @@
-requests
-python-dotenv
-discord.py
-colorlog
+# Core Discord bot framework
+discord.py>=2.3.0
+
+# HTTP requests for API calls
+requests>=2.31.0
+
+# Environment variable management
+python-dotenv>=1.0.0
+
+# Colored logging
+colorlog>=6.7.0
+
+# Standard library packages (included with Python, but listed for clarity)
+# asyncio - Built-in
+# json - Built-in  
+# os - Built-in
+# time - Built-in
+# datetime - Built-in
+# collections - Built-in
+# math - Built-in
+# logging - Built-in
