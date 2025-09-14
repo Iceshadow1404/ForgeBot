@@ -45,6 +45,26 @@ def calculate_quick_forge_reduction(forge_time_level: int | None) -> float:
         logger.warning(f"Unexpected forge_time_level: {level}. Returning 0%.")
         return 0.0
 
+def get_effective_forge_level(uuid: str, member_data: dict, registrations: dict) -> tuple[int | None, bool]:
+    """
+    Gets the effective forge level, checking registration first, then falling back to Hypixel API.
+    Returns a tuple of (forge_level, is_forced) where is_forced indicates if a registration override was used.
+    """
+    # First check if there's a quick_forge_level in registration
+    for user_data in registrations.values():
+        if isinstance(user_data, dict) and "accounts" in user_data:
+            accounts = user_data.get("accounts", [])
+            for account in accounts:
+                if account.get('uuid') == uuid and 'quick_forge_level' in account:
+                    quick_level = account['quick_forge_level']
+                    logger.debug(f"Using quick_forge_level {quick_level} from registration for UUID {uuid}")
+                    return quick_level, True
+    
+    # Fall back to Hypixel API data
+    forge_time_level = member_data.get("mining_core", {}).get("nodes", {}).get("forge_time")
+    logger.debug(f"Using forge_time_level {forge_time_level} from Hypixel API for UUID {uuid}")
+    return forge_time_level, False
+
 # --- Notification Manager Class ---
 
 class ForgeNotificationManager:
@@ -422,7 +442,8 @@ class ForgeNotificationManager:
                     member_data = profile.get("members", {}).get(mc_uuid, {})
                     forge_processes_data = member_data.get("forge", {}).get("forge_processes", {})
 
-                    forge_time_level = member_data.get("mining_core", {}).get("nodes", {}).get("forge_time")
+                    # Use the new helper function to get effective forge level
+                    forge_time_level, is_forced = get_effective_forge_level(mc_uuid, member_data, self.registrations)
                     time_reduction_percent = calculate_quick_forge_reduction(forge_time_level)
 
                     # Use the forge_cog_ref to check clock usage

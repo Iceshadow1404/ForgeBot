@@ -42,6 +42,34 @@ def calculate_quick_forge_reduction(forge_time_level: int | None) -> float:
         logger.warning(f"Unexpected forge_time_level: {level}. Returning 0%.")
         return 0.0
 
+def get_effective_forge_level(uuid: str, member_data: dict, registrations: dict) -> tuple[int | None, bool]:
+    """
+    Gets the effective forge level, checking registration first, then falling back to Hypixel API.
+    Returns a tuple of (forge_level, is_forced) where is_forced indicates if a registration override was used.
+    """
+    logger.info(f"DEBUG: Looking for forge level for UUID: '{uuid}' (type: {type(uuid)})")
+    logger.info(f"DEBUG: Available registrations: {list(registrations.keys())}")
+    
+    # First check if there's a quick_forge_level in registration
+    for user_id, user_data in registrations.items():
+        if isinstance(user_data, dict) and "accounts" in user_data:
+            accounts = user_data.get("accounts", [])
+            logger.info(f"DEBUG: Checking user {user_id} with {len(accounts)} accounts")
+            for i, account in enumerate(accounts):
+                account_uuid = account.get('uuid')
+                quick_level = account.get('quick_forge_level')
+                logger.info(f"DEBUG: Account {i}: UUID='{account_uuid}' (type: {type(account_uuid)}), Quick Forge Level={quick_level}")
+                logger.info(f"DEBUG: UUID comparison: '{uuid}' == '{account_uuid}' ? {uuid == account_uuid}")
+                if account_uuid == uuid and 'quick_forge_level' in account:
+                    quick_level = account['quick_forge_level']
+                    logger.info(f"SUCCESS: Found quick_forge_level {quick_level} from registration for UUID {uuid}")
+                    return quick_level, True
+    
+    # Fall back to Hypixel API data
+    forge_time_level = member_data.get("mining_core", {}).get("nodes", {}).get("forge_time")
+    logger.info(f"FALLBACK: Using forge_time_level {forge_time_level} from Hypixel API for UUID {uuid}")
+    return forge_time_level, False
+
 def format_active_forge_items(forge_processes_data: dict, forge_items_config: dict, time_reduction_percent: float,
                               clock_is_actively_buffing: bool) -> list[str]:
     """
@@ -251,7 +279,11 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                         else:
                             logger.warning(f"Invalid account entry found for user {user_id} in registrations (command): {account}. Skipping.")
                     if cleaned_accounts:
-                        cleaned_data[user_id] = cleaned_accounts
+                        # Store in the new format with accounts and notification_preference
+                        cleaned_data[user_id] = {
+                            "accounts": cleaned_accounts,
+                            "notification_preference": user_data.get("notification_preference", "webhook") if isinstance(user_data, dict) else "webhook"
+                        }
                 else:
                      logger.warning(f"Invalid user ID format: {user_id} (command). Skipping.")
 
@@ -470,13 +502,15 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
         """
         logger.info(f"Forge command triggered by {interaction.user.id} with username: {username}, profile: {profile_name}")
 
-        if not self.hypixel_api_key:
-            logger.warning("Forge command failed: Hypixel API key not configured.")
-            await interaction.response.send_message("Hypixel API key not configured.", ephemeral=True)
-            return
-
+        # Defer immediately to prevent timeout
         await interaction.response.defer()
         logger.debug("Deferred interaction for forge command.")
+
+        if not self.hypixel_api_key:
+            logger.warning("Forge command failed: Hypixel API key not configured.")
+            await interaction.followup.send("Hypixel API key not configured.", ephemeral=True)
+            return
+
         # Cleanup clock entries before potentially checking forge status
         self.cleanup_expired_clock_entries()
         logger.debug("Cleaned up expired clock entries before processing forge command.")
@@ -488,11 +522,25 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
             discord_user_id = str(interaction.user.id)
             # Reload registrations here to get the latest for the command
             self.registrations = self.load_registrations()
-            user_accounts = self.registrations.get(discord_user_id)
+            user_data = self.registrations.get(discord_user_id)
 
-            if not user_accounts:
+            if not user_data:
                 logger.info(f"User {discord_user_id} has no registered accounts.")
                 await interaction.followup.send("No registered accounts. Use `/register`.", ephemeral=True)
+                return
+
+            # Handle migration from old format (list of accounts) to new format (dict with accounts and preferences)
+            if isinstance(user_data, list):
+                # Old format: user_data is a list of accounts
+                user_accounts = user_data
+                logger.debug(f"User {discord_user_id} using old format (list of accounts).")
+            elif isinstance(user_data, dict) and "accounts" in user_data:
+                # New format: user_data is a dict with accounts and notification_preference
+                user_accounts = user_data.get("accounts", [])
+                logger.debug(f"User {discord_user_id} using new format (dict with accounts).")
+            else:
+                logger.warning(f"Invalid user data format for user {discord_user_id}: {user_data}. Skipping.")
+                await interaction.followup.send("Invalid registration data. Please re-register your account.", ephemeral=True)
                 return
 
             active_forge_profiles_data = []
@@ -553,11 +601,20 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
 
 
                     if has_any_active_items:
-                        forge_time_level = member_data.get("mining_core", {}).get("nodes", {}).get("forge_time")
+                        # Use the new helper function to get effective forge level
+                        logger.info(f"DEBUG: Paginated view - About to call get_effective_forge_level with UUID: {current_uuid}")
+                        logger.info(f"DEBUG: Paginated view - Current registrations data: {self.registrations}")
+                        forge_time_level, is_forced = get_effective_forge_level(current_uuid, member_data, self.registrations)
                         # Use the helper function from this file
                         time_reduction_percent = calculate_quick_forge_reduction(forge_time_level)
-                        perk_message = f" (Quick Forge: -{time_reduction_percent:.1f}%)" if time_reduction_percent > 0 else ""
-                        logger.debug(f"Profile {profile_internal_id}: Forge Time Level: {forge_time_level}, Reduction: {time_reduction_percent}%")
+                        if time_reduction_percent > 0:
+                            perk_message = f" (Quick Forge: -{time_reduction_percent:.1f}%)"
+                        else:
+                            perk_message = " (Quick Forge: 0%)"
+                        if is_forced:
+                            perk_message += " [FORCED]"
+                        logger.info(f"DEBUG: Paginated profile {profile_internal_id}: Forge Time Level: {forge_time_level}, Reduction: {time_reduction_percent}%, Forced: {is_forced}")
+                        logger.info(f"DEBUG: Paginated final perk_message: '{perk_message}'")
 
                         # Use the clock usage method from self (ForgeCog)
                         clock_is_actively_buffing = self.is_clock_used(current_uuid, profile_internal_id)
@@ -618,11 +675,25 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
             discord_user_id = str(interaction.user.id)
             # Reload registrations here for the command
             self.registrations = self.load_registrations()
-            user_accounts = self.registrations.get(discord_user_id)
+            user_data = self.registrations.get(discord_user_id)
 
-            if not user_accounts:
+            if not user_data:
                 logger.info(f"User {discord_user_id} has no registered accounts when trying to use default.")
                 await interaction.followup.send("Please provide a Minecraft username to check, or register your account first.", ephemeral=True)
+                return
+
+            # Handle migration from old format (list of accounts) to new format (dict with accounts and preferences)
+            if isinstance(user_data, list):
+                # Old format: user_data is a list of accounts
+                user_accounts = user_data
+                logger.debug(f"User {discord_user_id} using old format (list of accounts) for single profile.")
+            elif isinstance(user_data, dict) and "accounts" in user_data:
+                # New format: user_data is a dict with accounts and notification_preference
+                user_accounts = user_data.get("accounts", [])
+                logger.debug(f"User {discord_user_id} using new format (dict with accounts) for single profile.")
+            else:
+                logger.warning(f"Invalid user data format for user {discord_user_id}: {user_data}. Skipping.")
+                await interaction.followup.send("Invalid registration data. Please re-register your account.", ephemeral=True)
                 return
 
             first_registered_account = user_accounts[0]
@@ -705,12 +776,21 @@ class ForgeCog(commands.Cog, name="Forge Functions"):
                 f"Could not get internal profile ID for '{profile_cute_name}' ({target_uuid}). Clock buff/notifications may not work correctly.")
 
         member_data = target_profile.get("members", {}).get(target_uuid, {})
-        forge_time_level = member_data.get("mining_core", {}).get("nodes", {}).get("forge_time")
+        # Use the new helper function to get effective forge level
+        logger.info(f"DEBUG: About to call get_effective_forge_level with UUID: {target_uuid}")
+        logger.info(f"DEBUG: Current registrations data: {self.registrations}")
+        forge_time_level, is_forced = get_effective_forge_level(target_uuid, member_data, self.registrations)
         # Use the helper function from this file
         time_reduction_percent = calculate_quick_forge_reduction(forge_time_level)
-        perk_message = f" (Quick Forge: -{time_reduction_percent:.1f}%)" if time_reduction_percent > 0 else ""
+        if time_reduction_percent > 0:
+            perk_message = f" (Quick Forge: -{time_reduction_percent:.1f}%)"
+        else:
+            perk_message = " (Quick Forge: 0%)"
+        if is_forced:
+            perk_message += " [FORCED]"
         forge_processes_data = member_data.get("forge", {}).get("forge_processes", {})
-        logger.debug(f"Single profile '{profile_cute_name}': Forge Time Level: {forge_time_level}, Reduction: {time_reduction_percent}%")
+        logger.info(f"DEBUG: Single profile '{profile_cute_name}': Forge Time Level: {forge_time_level}, Reduction: {time_reduction_percent}%, Forced: {is_forced}")
+        logger.info(f"DEBUG: Final perk_message: '{perk_message}'")
 
         # Use the clock usage method from self (ForgeCog)
         clock_is_actively_buffing_single = False

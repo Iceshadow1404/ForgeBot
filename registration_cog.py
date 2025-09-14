@@ -57,11 +57,18 @@ class RegistrationCog(commands.Cog, name="Registration Functions"):
     @app_commands.command(name="register", description="Registers a Minecraft account and optional Skyblock profile with your Discord account.")
     @app_commands.describe(minecraft_username="The Minecraft username to register.")
     @app_commands.describe(profile_name="Optional: A specific Skyblock profile name (e.g., 'Apple') to register.")
-    async def register_command(self, interaction: discord.Interaction, minecraft_username: str, profile_name: str = None):
+    @app_commands.describe(quick_forge_level="Optional: Quick Forge level (1-20) to override Hypixel API response.")
+    async def register_command(self, interaction: discord.Interaction, minecraft_username: str, profile_name: str = None, quick_forge_level: int = None):
         """Registers a Minecraft account and optional Skyblock profile."""
         await interaction.response.defer(ephemeral=True) # Defer ephemerally as this is user-specific
 
         discord_user_id = str(interaction.user.id)
+
+        # Validate quick_forge_level if provided
+        if quick_forge_level is not None:
+            if not isinstance(quick_forge_level, int) or quick_forge_level < 1 or quick_forge_level > 20:
+                await interaction.followup.send("Quick Forge level must be between 1 and 20.")
+                return
 
         # 1. Get UUID from username
         uuid = get_uuid(minecraft_username)
@@ -107,7 +114,11 @@ class RegistrationCog(commands.Cog, name="Registration Functions"):
 
         if existing_account:
             # UUID already registered
-            if profile_name:
+            # Update quick_forge_level if provided
+            if quick_forge_level is not None:
+                existing_account['quick_forge_level'] = quick_forge_level
+                message = f"Successfully updated Quick Forge level to {quick_forge_level} for Minecraft account '{minecraft_username}'."
+            elif profile_name:
                 # Check if the profile is already registered for this account
                 if profile_name not in existing_account.get('profiles', []):
                     # Add the new profile name
@@ -131,10 +142,14 @@ class RegistrationCog(commands.Cog, name="Registration Functions"):
                 "uuid": uuid,
                 "profiles": [profile_name] if profile_name else [] # Add profile if provided, else empty list
             }
+            if quick_forge_level is not None:
+                new_account_entry['quick_forge_level'] = quick_forge_level
             user_registrations.append(new_account_entry)
             message = f"Successfully registered Minecraft account '{minecraft_username}'."
             if profile_name:
                 message += f" and profile '{profile_name}'."
+            if quick_forge_level is not None:
+                message += f" with Quick Forge level {quick_forge_level}."
 
         # 4. Save changes
         self.save_registrations()
@@ -275,6 +290,10 @@ class RegistrationCog(commands.Cog, name="Registration Functions"):
                     response_message += "  Registered Profiles: " + ", ".join(profiles) + "\n"
                 else:
                     response_message += "  Registered Profiles: None (Using last played profile)\n"
+                
+                quick_forge_level = account.get('quick_forge_level')
+                if quick_forge_level is not None:
+                    response_message += f"  Quick Forge Level: {quick_forge_level}\n"
 
         await interaction.followup.send(response_message)
 
@@ -310,54 +329,6 @@ class RegistrationCog(commands.Cog, name="Registration Functions"):
         
         await interaction.followup.send(f"Successfully set your notification preference to **{preference.title()}**.")
 
-    @app_commands.command(name="testdm", description="Sends a test DM notification to verify DM functionality.")
-    async def testdm_command(self, interaction: discord.Interaction):
-        """Sends a test DM notification to the user."""
-        await interaction.response.defer(ephemeral=True)
-
-        discord_user_id = str(interaction.user.id)
-        
-        # Create test notification data
-        test_notification_data = {
-            "message": "🧪 **TEST NOTIFICATION** 🧪\n\nYour forge items are ready:\n- Your **Test Item** on Test Profile was ready <t:1234567890:R> (started <t:1234567800:R>)",
-            "discord_user_id": discord_user_id,
-            "discord_user_id_str": discord_user_id,
-            "ready_items_sent": [{
-                "profile_internal_id": "test_profile_123",
-                "start_time_ms": 1234567800000,
-                "adjusted_end_time_ms": 1234567890000
-            }]
-        }
-
-        try:
-            # Import the notification manager from forge_notifications
-            from forge_notifications import ForgeNotificationManager
-            
-            # Create a temporary notification manager instance for testing
-            # We'll use None for parameters we don't need for this test
-            temp_manager = ForgeNotificationManager(
-                bot=self.bot,
-                hypixel_api_key=None,  # Not needed for DM test
-                webhook_url=None,      # Not needed for DM test
-                forge_items_data={},   # Not needed for DM test
-                forge_cog_ref=None    # Not needed for DM test
-            )
-            
-            # Send the test DM
-            await temp_manager.send_forge_dm(test_notification_data)
-            
-            await interaction.followup.send("✅ Test DM sent! Check your DMs to see if you received the notification.")
-            
-        except Exception as e:
-            await interaction.followup.send(f"❌ Error sending test DM: {str(e)}")
-
-    @app_commands.command(name="myid", description="Shows your Discord user ID for testing purposes.")
-    async def myid_command(self, interaction: discord.Interaction):
-        """Shows the user's Discord ID."""
-        await interaction.response.defer(ephemeral=True)
-        
-        user_id = str(interaction.user.id)
-        await interaction.followup.send(f"Your Discord User ID is: `{user_id}`\n\nYou can use this ID in the test script by editing `test_dm.py` and replacing the hardcoded ID.")
 
 
 async def setup(bot: commands.Bot):
